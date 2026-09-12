@@ -95,6 +95,9 @@ class ExpenseAnalyzer:
         except Exception as exc:
             safe_error = _safe_error(exc)
             logger.warning("OpenAI assessment failed; using fallback: %s", safe_error)
+            # Streamlit Community Cloud reliably captures stdout in its app logs.
+            # Keep the diagnostic free of credentials and request payload data.
+            print(f"OpenAI assessment fallback: {safe_error}", flush=True)
             fallback = rule_based_assessment(payload, safe_error)
             return AssessmentResult(
                 summary=fallback.summary,
