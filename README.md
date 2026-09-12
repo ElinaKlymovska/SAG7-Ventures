@@ -5,6 +5,8 @@ Streamlit. Employees submit USD reimbursement claims, the system routes each cat
 configured approver, and approvers receive an advisory AI consistency check before making the
 final decision.
 
+**Live demo:** [sag7-expense-approval.streamlit.app](https://sag7-expense-approval.streamlit.app/)
+
 The AI never approves, rejects, or blocks a claim. If OpenAI is slow, unavailable, or not
 configured, the app immediately remains usable and labels its deterministic fallback clearly.
 
@@ -159,4 +161,3 @@ Never commit `.streamlit/secrets.toml` or an API key.
   approver. The UI warns users not to enter real financial data.
 - Registration, receipt uploads, editing submitted claims, notifications, currency conversion,
   SSO, audit exports, and production database operations are out of scope.
-
