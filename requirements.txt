@@ -1,0 +1,7 @@
+streamlit==1.63.0
+SQLAlchemy==2.0.45
+alembic==1.16.5
+argon2-cffi==25.1.0
+openai==2.14.0
+pydantic==2.12.5
+

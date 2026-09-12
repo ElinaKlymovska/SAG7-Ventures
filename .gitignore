@@ -1,0 +1,15 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+.env
+.streamlit/secrets.toml
+data/*.sqlite3
+data/*.sqlite3-*
+!data/.gitkeep
+
