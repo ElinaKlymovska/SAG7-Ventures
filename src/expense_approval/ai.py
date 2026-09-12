@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from dataclasses import dataclass
 from time import perf_counter
 from typing import Any
@@ -10,6 +11,8 @@ from openai import OpenAI
 from pydantic import BaseModel, Field
 
 from expense_approval.models import AssessmentSource, ExpenseClaim
+
+logger = logging.getLogger(__name__)
 
 AI_INSTRUCTIONS = """You assist a human expense approver. Summarize the claim in one or two
 short sentences and identify only clear inconsistencies between amount, category, and description.
@@ -90,7 +93,9 @@ class ExpenseAnalyzer:
                 latency_ms=latency_ms,
             )
         except Exception as exc:
-            fallback = rule_based_assessment(payload, _safe_error(exc))
+            safe_error = _safe_error(exc)
+            logger.warning("OpenAI assessment failed; using fallback: %s", safe_error)
+            fallback = rule_based_assessment(payload, safe_error)
             return AssessmentResult(
                 summary=fallback.summary,
                 is_inconsistent=fallback.is_inconsistent,
@@ -182,4 +187,3 @@ def _safe_error(exc: Exception) -> str:
     name = type(exc).__name__
     message = str(exc).strip().replace("\n", " ")
     return f"{name}: {message[:160]}" if message else name
-
