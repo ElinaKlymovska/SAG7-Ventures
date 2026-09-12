@@ -12,4 +12,4 @@ venv/
 data/*.sqlite3
 data/*.sqlite3-*
 !data/.gitkeep
-
+work/

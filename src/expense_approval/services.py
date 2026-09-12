@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass
 from datetime import date
@@ -12,11 +13,13 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import joinedload, selectinload
 
 from expense_approval.db import Database
+from expense_approval.documents import MAX_DOCUMENT_BYTES, ProcessedDocument
 from expense_approval.models import (
     AIAssessment,
     AssessmentSource,
     Category,
     ExpenseClaim,
+    ExpenseDocument,
     ExpenseStatus,
     RoleName,
     User,
@@ -79,6 +82,7 @@ class ExpenseService:
             joinedload(ExpenseClaim.employee),
             joinedload(ExpenseClaim.category).joinedload(Category.approver),
             joinedload(ExpenseClaim.decided_by),
+            joinedload(ExpenseClaim.document),
             selectinload(ExpenseClaim.assessments),
         )
 
@@ -128,12 +132,15 @@ class ExpenseService:
         description: str,
         expense_date: date,
         payment_details: str,
+        document: ProcessedDocument | None = None,
     ) -> ExpenseClaim:
         amount_cents = self._validate_amount(amount)
         clean_description = self._validate_text(description, "Description", 10, 500)
         clean_payment = self._validate_text(payment_details, "Payment details", 5, 500)
         if expense_date > date.today():
             raise ValidationError("Expense date cannot be in the future.")
+        if document is not None:
+            self._validate_document(document)
 
         with self.database.session() as session:
             self._require_role(session, actor_id, RoleName.EMPLOYEE)
@@ -152,6 +159,28 @@ class ExpenseService:
             )
             session.add(claim)
             session.flush()
+            if document is not None:
+                extraction = document.extraction
+                session.add(
+                    ExpenseDocument(
+                        claim_id=claim.id,
+                        original_name=document.original_name,
+                        mime_type=document.mime_type,
+                        size_bytes=document.size_bytes,
+                        sha256=document.sha256,
+                        content=document.content,
+                        document_kind=extraction.kind.value,
+                        processing_method=extraction.processing_method,
+                        vendor=extraction.vendor,
+                        document_number=extraction.document_number,
+                        detected_amount=str(extraction.amount) if extraction.amount else None,
+                        detected_currency=extraction.currency,
+                        detected_date=extraction.expense_date,
+                        category_hint=extraction.category_hint,
+                        confidence_percent=round(extraction.confidence * 100),
+                        warnings_json=json.dumps(extraction.warnings),
+                    )
+                )
             claim_id = claim.id
 
         return self.get_claim_for_employee(actor_id, claim_id)
@@ -407,3 +436,15 @@ class ExpenseService:
         if len(cleaned) > maximum:
             raise ValidationError(f"{label} must be {maximum} characters or fewer.")
         return cleaned
+
+    @staticmethod
+    def _validate_document(document: ProcessedDocument) -> None:
+        if not document.extraction.is_expense_evidence:
+            raise ValidationError("The uploaded file is not valid expense evidence.")
+        size_is_invalid = document.size_bytes != len(document.content) or not (
+            0 < document.size_bytes <= MAX_DOCUMENT_BYTES
+        )
+        if size_is_invalid:
+            raise ValidationError("The supporting document has an invalid size.")
+        if hashlib.sha256(document.content).hexdigest() != document.sha256:
+            raise ValidationError("The supporting document failed its integrity check.")

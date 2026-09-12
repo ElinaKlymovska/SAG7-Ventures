@@ -11,6 +11,7 @@ from expense_approval.models import (
     AIAssessment,
     Category,
     ExpenseClaim,
+    ExpenseDocument,
     ExpenseStatus,
     RoleName,
     User,
@@ -43,6 +44,7 @@ def seed_if_empty(database: Database) -> bool:
 def reset_demo_data(database: Database) -> None:
     with database.session() as session:
         session.execute(delete(AIAssessment))
+        session.execute(delete(ExpenseDocument))
         session.execute(delete(ExpenseClaim))
         session.execute(delete(Category))
         session.execute(delete(UserRole))
@@ -174,4 +176,3 @@ def _seed(session: Session) -> None:
         ),
     ]
     session.add_all(claims)
-

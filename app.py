@@ -16,6 +16,11 @@ import streamlit as st
 from expense_approval.ai import AssessmentResult, ExpenseAnalyzer, build_ai_payload, payload_hash
 from expense_approval.config import Settings, load_settings
 from expense_approval.db import Database
+from expense_approval.documents import (
+    DocumentProcessingError,
+    ProcessedDocument,
+    process_document,
+)
 from expense_approval.models import AssessmentSource, ExpenseClaim, ExpenseStatus, RoleName
 from expense_approval.seed import DEMO_PASSWORD, reset_demo_data, seed_if_empty
 from expense_approval.services import ExpenseApprovalError, ExpenseService, StoredAssessment
@@ -98,6 +103,13 @@ def _streamlit_secrets() -> dict[str, object]:
         return dict(st.secrets)
     except Exception:
         return {}
+
+
+@st.cache_data(show_spinner=False, ttl=3600, max_entries=32)
+def _process_document_cached(
+    original_name: str, mime_type: str | None, content: bytes
+) -> ProcessedDocument:
+    return process_document(original_name, mime_type, content)
 
 
 def render_login(resources: AppResources) -> None:
@@ -247,19 +259,77 @@ def render_claim_form(resources: AppResources, user_id: int) -> None:
     nonce = st.session_state.setdefault("claim_form_nonce", 0)
     with st.container(border=True):
         st.subheader("New reimbursement request")
-        st.caption("All amounts are in USD. Fields marked with * are required.")
-        with st.form(f"claim_form_{nonce}"):
+        st.caption(
+            "Upload an invoice, receipt, or travel document to prefill the claim, "
+            "or enter it manually. All submitted amounts remain fixed in USD."
+        )
+        uploaded_file = st.file_uploader(
+            "Supporting document",
+            type=["pdf", "jpg", "jpeg", "png", "webp"],
+            key=f"claim_document_{nonce}",
+            help=(
+                "PDF or image, up to 8 MB. The file is processed locally and is not "
+                "sent to OpenAI."
+            ),
+            max_upload_size=8,
+        )
+        document: ProcessedDocument | None = None
+        document_error: str | None = None
+        if uploaded_file is not None:
+            try:
+                with st.spinner("Reading the document locally…"):
+                    document = _process_document_cached(
+                        uploaded_file.name,
+                        uploaded_file.type,
+                        uploaded_file.getvalue(),
+                    )
+            except DocumentProcessingError as exc:
+                document_error = str(exc)
+                st.error(document_error)
+            else:
+                _render_document_extraction(document)
+
+        extraction = document.extraction if document else None
+        suggested_category = (
+            extraction.category_hint
+            if extraction and extraction.category_hint in category_by_name
+            else next(iter(category_by_name))
+        )
+        suggested_amount = (
+            float(extraction.amount)
+            if extraction and extraction.amount and extraction.currency == "USD"
+            else 0.0
+        )
+        suggested_date = (
+            extraction.expense_date
+            if extraction and extraction.expense_date and extraction.expense_date <= date.today()
+            else date.today()
+        )
+        suggested_description = extraction.description if extraction else ""
+        document_token = document.sha256[:10] if document else "manual"
+
+        with st.form(f"claim_form_{nonce}_{document_token}"):
             first, second = st.columns(2)
             amount = first.number_input(
-                "Amount (USD) *", min_value=0.01, max_value=1_000_000.0, step=0.01
+                "Amount (USD) *",
+                min_value=0.0,
+                max_value=1_000_000.0,
+                value=suggested_amount,
+                step=0.01,
             )
-            category_name = second.selectbox("Category *", options=list(category_by_name))
+            category_options = list(category_by_name)
+            category_name = second.selectbox(
+                "Category *",
+                options=category_options,
+                index=category_options.index(suggested_category),
+            )
             expense_date = first.date_input(
-                "Expense date *", value=date.today(), max_value=date.today()
+                "Expense date *", value=suggested_date, max_value=date.today()
             )
             second.text_input("Currency", value="USD", disabled=True)
             description = st.text_area(
                 "Description *",
+                value=suggested_description,
                 placeholder="What was purchased and why was it needed?",
                 max_chars=500,
             )
@@ -269,10 +339,24 @@ def render_claim_form(resources: AppResources, user_id: int) -> None:
                 max_chars=500,
             )
             st.warning("Demo environment: never enter real banking or card information.")
+            extraction_confirmed = True
+            if document is not None and document.extraction.is_expense_evidence:
+                extraction_confirmed = st.checkbox(
+                    "I reviewed the extracted fields and entered the correct USD amount."
+                )
             submitted = st.form_submit_button(
-                "Submit for approval", type="primary", use_container_width=True
+                "Submit for approval",
+                type="primary",
+                use_container_width=True,
+                disabled=bool(
+                    document_error
+                    or (document and not document.extraction.is_expense_evidence)
+                ),
             )
         if submitted:
+            if not extraction_confirmed:
+                st.error("Review and confirm the document extraction before submitting.")
+                return
             try:
                 claim = resources.service.create_claim(
                     user_id,
@@ -281,6 +365,7 @@ def render_claim_form(resources: AppResources, user_id: int) -> None:
                     description=description,
                     expense_date=expense_date,
                     payment_details=payment_details,
+                    document=document,
                 )
             except ExpenseApprovalError as exc:
                 st.error(str(exc))
@@ -291,6 +376,35 @@ def render_claim_form(resources: AppResources, user_id: int) -> None:
                     f"{claim.display_id} was submitted to {claim.category.approver.full_name}.",
                 )
                 st.rerun()
+
+
+def _render_document_extraction(document: ProcessedDocument) -> None:
+    extraction = document.extraction
+    if extraction.is_expense_evidence:
+        st.success(f"Recognized {extraction.kind.value.replace('_', ' ')}")
+    else:
+        st.error(f"Rejected document type: {extraction.kind.value.replace('_', ' ')}")
+
+    columns = st.columns(4)
+    columns[0].caption("VENDOR")
+    columns[0].write(extraction.vendor or "Not found")
+    columns[1].caption("DOCUMENT")
+    columns[1].write(extraction.document_number or "Not found")
+    columns[2].caption("ORIGINAL TOTAL")
+    amount_label = (
+        f"{extraction.amount:,.2f} {extraction.currency or ''}".strip()
+        if extraction.amount
+        else "Not found"
+    )
+    columns[2].write(amount_label)
+    columns[3].caption("SUGGESTED CATEGORY")
+    columns[3].write(extraction.category_hint)
+    st.caption(
+        f"{extraction.processing_method} · {round(extraction.confidence * 100)}% confidence · "
+        "raw document content is never sent to OpenAI"
+    )
+    for warning in extraction.warnings:
+        st.warning(warning)
 
 
 @st.fragment(run_every="2s")

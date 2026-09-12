@@ -12,6 +12,7 @@ from sqlalchemy import (
     Enum,
     ForeignKey,
     Integer,
+    LargeBinary,
     String,
     Text,
     UniqueConstraint,
@@ -137,6 +138,9 @@ class ExpenseClaim(Base):
     assessments: Mapped[list[AIAssessment]] = relationship(
         back_populates="claim", cascade="all, delete-orphan"
     )
+    document: Mapped[ExpenseDocument | None] = relationship(
+        back_populates="claim", cascade="all, delete-orphan", uselist=False
+    )
 
     @property
     def display_id(self) -> str:
@@ -170,3 +174,35 @@ class AIAssessment(Base):
 
     claim: Mapped[ExpenseClaim] = relationship(back_populates="assessments")
 
+
+class ExpenseDocument(Base):
+    __tablename__ = "expense_documents"
+    __table_args__ = (
+        CheckConstraint("size_bytes > 0", name="ck_expense_document_size_positive"),
+        CheckConstraint(
+            "size_bytes <= 8388608", name="ck_expense_document_size_maximum"
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    claim_id: Mapped[int] = mapped_column(
+        ForeignKey("expense_claims.id", ondelete="CASCADE"), unique=True, index=True
+    )
+    original_name: Mapped[str] = mapped_column(String(255))
+    mime_type: Mapped[str] = mapped_column(String(100))
+    size_bytes: Mapped[int] = mapped_column(Integer)
+    sha256: Mapped[str] = mapped_column(String(64), index=True)
+    content: Mapped[bytes] = mapped_column(LargeBinary)
+    document_kind: Mapped[str] = mapped_column(String(40))
+    processing_method: Mapped[str] = mapped_column(String(80))
+    vendor: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    document_number: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    detected_amount: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    detected_currency: Mapped[str | None] = mapped_column(String(3), nullable=True)
+    detected_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    category_hint: Mapped[str] = mapped_column(String(80))
+    confidence_percent: Mapped[int] = mapped_column(Integer)
+    warnings_json: Mapped[str] = mapped_column(Text, default="[]")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+    claim: Mapped[ExpenseClaim] = relationship(back_populates="document")

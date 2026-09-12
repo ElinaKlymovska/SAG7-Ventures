@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime
 
 import streamlit as st
@@ -170,6 +171,41 @@ def render_claim_details(claim: ExpenseClaim, *, show_employee: bool = False) ->
     with st.expander("Payment details", icon="💳"):
         st.warning("Demo data only. Never enter real banking or card information here.")
         st.write(claim.payment_details)
+
+    if claim.document:
+        document = claim.document
+        with st.expander(f"Supporting document · {document.original_name}", icon="📎"):
+            columns = st.columns(3)
+            columns[0].caption("TYPE")
+            columns[0].write(document.document_kind.replace("_", " ").title())
+            columns[1].caption("EXTRACTED TOTAL")
+            detected_total = (
+                f"{document.detected_amount} {document.detected_currency or ''}".strip()
+                if document.detected_amount
+                else "Not found"
+            )
+            columns[1].write(detected_total)
+            columns[2].caption("LOCAL EXTRACTION")
+            columns[2].write(f"{document.confidence_percent}% confidence")
+            if document.vendor:
+                st.caption("VENDOR")
+                st.write(document.vendor)
+            try:
+                warnings = json.loads(document.warnings_json)
+            except json.JSONDecodeError:
+                warnings = []
+            for warning in warnings:
+                st.warning(str(warning))
+            st.caption(
+                f"Processed with {document.processing_method}. The raw file was not sent to OpenAI."
+            )
+            st.download_button(
+                "Download original",
+                data=document.content,
+                file_name=document.original_name,
+                mime=document.mime_type,
+                key=f"download_document_{document.id}_{show_employee}",
+            )
 
     if claim.decision_comment:
         st.caption("DECISION COMMENT")
