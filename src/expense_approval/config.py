@@ -15,7 +15,7 @@ class Settings:
     database_url: str
     openai_api_key: str | None
     openai_model: str = "gpt-5-mini"
-    ai_timeout_seconds: float = 4.0
+    ai_timeout_seconds: float = 10.0
 
 
 def _value(name: str, secrets: Mapping[str, Any] | None, default: Any = None) -> Any:
@@ -35,7 +35,7 @@ def load_settings(secrets: Mapping[str, Any] | None = None) -> Settings:
     )
     api_key = str(_value("OPENAI_API_KEY", secrets, "")).strip() or None
     model = str(_value("OPENAI_MODEL", secrets, "gpt-5-mini")).strip()
-    timeout = float(_value("AI_TIMEOUT_SECONDS", secrets, 4.0))
+    timeout = float(_value("AI_TIMEOUT_SECONDS", secrets, 10.0))
     return Settings(
         database_url=database_url,
         openai_api_key=api_key,

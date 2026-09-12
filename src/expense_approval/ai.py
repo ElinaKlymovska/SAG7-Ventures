@@ -53,10 +53,18 @@ def payload_hash(payload: dict[str, str]) -> str:
 
 
 class ExpenseAnalyzer:
-    def __init__(self, api_key: str | None, model: str, timeout_seconds: float = 4.0):
+    def __init__(self, api_key: str | None, model: str, timeout_seconds: float = 10.0):
         self.api_key = api_key
         self.model = model
         self.timeout_seconds = timeout_seconds
+        # Reuse one HTTP connection pool for the lifetime of the cached Streamlit
+        # resource. Creating a client for every assessment adds DNS/TLS overhead
+        # and made the previous four-second request budget unreliable.
+        self._client = (
+            OpenAI(api_key=api_key, max_retries=0, timeout=timeout_seconds)
+            if api_key
+            else None
+        )
 
     @property
     def openai_enabled(self) -> bool:
@@ -68,13 +76,15 @@ class ExpenseAnalyzer:
 
         started = perf_counter()
         try:
-            client = OpenAI(api_key=self.api_key, max_retries=0, timeout=self.timeout_seconds)
-            response = client.responses.parse(
+            if self._client is None:
+                raise RuntimeError("OpenAI client is unavailable.")
+            response = self._client.responses.parse(
                 model=self.model,
                 instructions=AI_INSTRUCTIONS,
                 input=json.dumps(payload, ensure_ascii=False),
                 text_format=StructuredAssessment,
-                max_output_tokens=250,
+                reasoning={"effort": "minimal"},
+                max_output_tokens=200,
                 store=False,
                 timeout=self.timeout_seconds,
             )

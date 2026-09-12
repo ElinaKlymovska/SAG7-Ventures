@@ -145,7 +145,7 @@ fallback behavior, caching, and a Streamlit login-page smoke test.
    ```toml
    OPENAI_API_KEY = "your-key"
    OPENAI_MODEL = "gpt-5-mini"
-   AI_TIMEOUT_SECONDS = 4.0
+   AI_TIMEOUT_SECONDS = 10.0
    ```
 
 5. Share the generated `streamlit.app` URL together with the repository and demo credentials.

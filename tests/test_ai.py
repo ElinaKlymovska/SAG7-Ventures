@@ -89,7 +89,48 @@ def test_openai_structured_response_is_parsed(monkeypatch: object) -> None:
     assert captured["model"] == "gpt-5-mini"
     assert captured["store"] is False
     assert captured["text_format"] is StructuredAssessment
+    assert captured["reasoning"] == {"effort": "minimal"}
+    assert captured["max_output_tokens"] == 200
+    assert captured["client"] == {
+        "api_key": "test-key",
+        "max_retries": 0,
+        "timeout": 4.0,
+    }
     assert "payment_details" not in str(captured["input"])
+
+
+def test_openai_client_is_reused_between_assessments(monkeypatch: object) -> None:
+    client_creations = 0
+
+    class FakeResponses:
+        def parse(self, **_kwargs: object) -> SimpleNamespace:
+            return SimpleNamespace(
+                output_parsed=StructuredAssessment(
+                    summary="A concise summary.",
+                    is_inconsistent=False,
+                    reasons=[],
+                )
+            )
+
+    class FakeOpenAI:
+        def __init__(self, **_kwargs: object):
+            nonlocal client_creations
+            client_creations += 1
+            self.responses = FakeResponses()
+
+    monkeypatch.setattr("expense_approval.ai.OpenAI", FakeOpenAI)
+    analyzer = ExpenseAnalyzer("test-key", "gpt-5-mini")
+    payload = {
+        "amount_usd": "12.00",
+        "category": "Office",
+        "description": "A box of blue ballpoint pens",
+        "expense_date": "2026-09-10",
+    }
+
+    analyzer.analyze(payload)
+    analyzer.analyze(payload)
+
+    assert client_creations == 1
 
 
 def test_api_failure_falls_back(monkeypatch: object) -> None:
