@@ -219,7 +219,7 @@ def render_sidebar(resources: AppResources, user: object) -> None:
 
         if len(user.roles) > 1:
             st.divider()
-            selected = st.radio(
+            st.radio(
                 "Workspace",
                 options=[RoleName.EMPLOYEE.value, RoleName.APPROVER.value],
                 format_func=lambda value: {
@@ -228,7 +228,6 @@ def render_sidebar(resources: AppResources, user: object) -> None:
                 }[value],
                 key="role_view",
             )
-            st.session_state.role_view = selected
 
         st.divider()
         ai_label = (

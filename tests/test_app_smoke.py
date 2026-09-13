@@ -33,3 +33,22 @@ def test_employee_page_renders_document_uploader(
     uploaders = app.get("file_uploader")
     assert len(uploaders) == 1
     assert uploaders[0].label == "Supporting document"
+
+
+def test_dual_role_user_can_switch_workspaces(
+    tmp_path: Path, monkeypatch: object
+) -> None:
+    database_url = f"sqlite:///{tmp_path / 'dual-ui.sqlite3'}"
+    monkeypatch.setenv("DATABASE_URL", database_url)
+    app_path = Path(__file__).resolve().parents[1] / "app.py"
+    app = AppTest.from_file(str(app_path), default_timeout=15).run()
+
+    next(button for button in app.button if button.label == "Dual role").click().run()
+    next(button for button in app.button if button.label == "Sign in").click().run()
+
+    assert not app.exception
+    workspace = next(radio for radio in app.radio if radio.label == "Workspace")
+    assert workspace.value == "employee"
+    workspace.set_value("approver").run()
+    assert not app.exception
+    assert any(title.value == "Approval queue" for title in app.title)
