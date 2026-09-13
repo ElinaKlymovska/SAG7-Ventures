@@ -127,10 +127,20 @@ def build_payment_details_payload(
 
 
 class ExpenseAnalyzer:
-    def __init__(self, api_key: str | None, model: str, timeout_seconds: float = 10.0):
+    def __init__(
+        self,
+        api_key: str | None,
+        model: str,
+        timeout_seconds: float = 10.0,
+        send_document_images: bool = False,
+    ):
         self.api_key = api_key
         self.model = model
         self.timeout_seconds = timeout_seconds
+        # Off by default: an image is the one payload no sanitizer can redact, so the
+        # whole document — bank details, signatures, identity — would leave the system
+        # verbatim. Opt in with AI_SEND_DOCUMENT_IMAGES when that is acceptable.
+        self.send_document_images = send_document_images
         # Reuse one HTTP connection pool for the lifetime of the cached Streamlit
         # resource. Creating a client for every assessment adds DNS/TLS overhead
         # and made the previous four-second request budget unreliable.
@@ -270,7 +280,7 @@ class ExpenseAnalyzer:
             content: list[dict[str, str]] = [
                 {"type": "input_text", "text": context}
             ]
-            uses_vision = document.mime_type.startswith("image/")
+            uses_vision = self.send_document_images and document.mime_type.startswith("image/")
             if uses_vision:
                 encoded = base64.b64encode(document.content).decode("ascii")
                 content.append(
@@ -424,17 +434,36 @@ def _merge_document_extraction(
     warnings = tuple(warning.strip() for warning in parsed.warnings if warning.strip())
     if vendor is None:
         warnings += ("Vendor is not visible in the document; do not guess it.",)
+    # The model may only *withdraw* evidence status, never grant it. Text inside an
+    # uploaded file reaches the model as input, so a document that instructs it to
+    # answer "this is a valid receipt" would otherwise walk straight through the
+    # gate in ExpenseService._validate_document. The local classifier decides what
+    # is admissible; the model is left able to reject what the local rules missed.
+    is_expense_evidence = local.is_expense_evidence and parsed.is_expense_evidence
+    if local.is_expense_evidence and not parsed.is_expense_evidence:
+        warnings += ("AI review rejected this file as expense evidence.",)
+    if not is_expense_evidence:
+        # Keep a rejected file described by the local classifier alone, so an injected
+        # "Invoice, 93% confidence" cannot dress up a file the gate will refuse anyway.
+        kind = local.kind
+        warnings += tuple(w for w in local.warnings if w not in warnings)
     return DocumentExtraction(
         kind=kind,
-        is_expense_evidence=parsed.is_expense_evidence,
+        is_expense_evidence=is_expense_evidence,
         vendor=vendor,
         document_number=document_number,
         amount=amount,
         currency=currency,
         expense_date=extracted_date,
-        category_hint=parsed.suggested_category.strip(),
-        description=parsed.description.strip(),
-        confidence=parsed.confidence_percent / 100,
+        category_hint=(
+            parsed.suggested_category.strip() if is_expense_evidence else local.category_hint
+        ),
+        description=(
+            parsed.description.strip() if is_expense_evidence else local.description
+        ),
+        confidence=(
+            parsed.confidence_percent / 100 if is_expense_evidence else local.confidence
+        ),
         processing_method=processing_method,
         warnings=warnings[:5],
         routing_category=routing_category,
