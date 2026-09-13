@@ -79,7 +79,9 @@ def main() -> None:
 
     try:
         user = resources.service.get_user(int(user_id))
-    except ExpenseApprovalError:
+    except Exception as exc:
+        if not _is_user_safe_error(exc):
+            raise
         st.session_state.pop("user_id", None)
         st.rerun()
         return
@@ -282,7 +284,9 @@ def render_claim_form(resources: AppResources, user_id: int) -> None:
                         uploaded_file.type,
                         uploaded_file.getvalue(),
                     )
-            except DocumentProcessingError as exc:
+            except Exception as exc:
+                if not _is_user_safe_error(exc):
+                    raise
                 document_error = str(exc)
                 st.error(document_error)
             else:
@@ -366,7 +370,9 @@ def render_claim_form(resources: AppResources, user_id: int) -> None:
                     payment_details=payment_details,
                     document=document,
                 )
-            except ExpenseApprovalError as exc:
+            except Exception as exc:
+                if not _is_user_safe_error(exc):
+                    raise
                 st.error(str(exc))
             else:
                 st.session_state.claim_form_nonce = nonce + 1
@@ -444,7 +450,9 @@ def render_employee_claims(resources: AppResources, user_id: int) -> None:
                     ):
                         try:
                             resources.service.withdraw_claim(user_id, claim.id)
-                        except ExpenseApprovalError as exc:
+                        except Exception as exc:
+                            if not _is_user_safe_error(exc):
+                                raise
                             st.error(str(exc))
                         else:
                             _set_flash("success", f"{claim.display_id} was withdrawn.")
@@ -540,7 +548,9 @@ def render_approver_detail(
             decision = ExpenseStatus.APPROVED if approved else ExpenseStatus.REJECTED
             try:
                 resources.service.decide_claim(user_id, claim.id, decision, comment)
-            except ExpenseApprovalError as exc:
+            except Exception as exc:
+                if not _is_user_safe_error(exc):
+                    raise
                 st.error(str(exc))
             else:
                 st.session_state.pop("selected_approval_claim", None)
@@ -665,6 +675,17 @@ def _render_flash() -> None:
         st.toast(message, icon="✅")
     else:
         st.toast(message, icon="ℹ️")
+
+
+def _is_user_safe_error(exc: Exception) -> bool:
+    """Recognize display-safe domain errors even across Streamlit module reloads."""
+    safe_bases = {
+        ("expense_approval.documents", DocumentProcessingError.__name__),
+        ("expense_approval.services", ExpenseApprovalError.__name__),
+    }
+    return any(
+        (base.__module__, base.__name__) in safe_bases for base in type(exc).__mro__
+    )
 
 
 if __name__ == "__main__":
