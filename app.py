@@ -45,6 +45,8 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
+RESOURCE_CACHE_VERSION = "payment-suggestions-v1"
+
 
 @dataclass
 class AppResources:
@@ -56,7 +58,8 @@ class AppResources:
 
 
 @st.cache_resource
-def get_resources(settings: Settings) -> AppResources:
+def get_resources(settings: Settings, cache_version: str) -> AppResources:
+    del cache_version  # Changing this value safely invalidates resources after API changes.
     database = Database(settings.database_url)
     database.migrate()
     seed_if_empty(database)
@@ -76,7 +79,7 @@ def get_resources(settings: Settings) -> AppResources:
 def main() -> None:
     inject_styles()
     settings = load_settings(_streamlit_secrets())
-    resources = get_resources(settings)
+    resources = get_resources(settings, RESOURCE_CACHE_VERSION)
     _render_flash()
 
     user_id = st.session_state.get("user_id")
@@ -401,8 +404,8 @@ def render_claim_form(resources: AppResources, user_id: int) -> None:
                 expense_date=expense_date.isoformat(),
             )
             with st.spinner("Creating a safe payment reference…"):
-                st.session_state[suggestion_key] = (
-                    resources.analyzer.suggest_payment_details(suggestion_payload)
+                st.session_state[suggestion_key] = _suggest_payment_details(
+                    resources, suggestion_payload
                 )
             st.session_state[suggestion_revision_key] = suggestion_revision + 1
             st.rerun()
@@ -736,6 +739,19 @@ def _is_user_safe_error(exc: Exception) -> bool:
     return any(
         (base.__module__, base.__name__) in safe_bases for base in type(exc).__mro__
     )
+
+
+def _suggest_payment_details(
+    resources: AppResources, payload: dict[str, str]
+) -> PaymentSuggestionResult:
+    """Recover gracefully if Streamlit retained an analyzer from an older deployment."""
+    if not hasattr(resources.analyzer, "suggest_payment_details"):
+        resources.analyzer = ExpenseAnalyzer(
+            resources.settings.openai_api_key,
+            resources.settings.openai_model,
+            resources.settings.ai_timeout_seconds,
+        )
+    return resources.analyzer.suggest_payment_details(payload)
 
 
 if __name__ == "__main__":
