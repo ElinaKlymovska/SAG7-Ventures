@@ -232,7 +232,11 @@ def test_service_stores_validated_document(
     )
 
     assert claim.document is not None
-    assert claim.document.content == content
+    # The original file is deliberately not retained; only its metadata is.
+    assert not hasattr(claim.document, "content")
+    assert claim.document.original_name == "invoice.pdf"
+    assert claim.document.size_bytes == len(content)
+    assert claim.document.vendor == "Example Office Supply"
     assert claim.document.sha256 == document.sha256
     assert claim.document.document_kind == DocumentKind.INVOICE.value
     assert service.get_claim_for_approver(ids[APPROVER], claim.id).document is not None

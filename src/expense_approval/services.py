@@ -168,7 +168,6 @@ class ExpenseService:
                         mime_type=document.mime_type,
                         size_bytes=document.size_bytes,
                         sha256=document.sha256,
-                        content=document.content,
                         document_kind=extraction.kind.value,
                         processing_method=extraction.processing_method,
                         vendor=extraction.vendor,

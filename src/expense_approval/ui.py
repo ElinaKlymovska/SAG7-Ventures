@@ -199,12 +199,9 @@ def render_claim_details(claim: ExpenseClaim, *, show_employee: bool = False) ->
             st.caption(
                 f"Processed with {document.processing_method}. The raw file was not sent to OpenAI."
             )
-            st.download_button(
-                "Download original",
-                data=document.content,
-                file_name=document.original_name,
-                mime=document.mime_type,
-                key=f"download_document_{document.id}_{show_employee}",
+            st.caption(
+                "The original file is never stored. Only the fields extracted above, "
+                "its name, and its checksum are kept."
             )
 
     if claim.decision_comment:

@@ -109,8 +109,9 @@ reviews every field before submission. A detected UAH, PLN, or INR total is disp
 original currency, but the employee must enter the correct USD claim amount because currency
 conversion is outside the MVP.
 
-The raw attachment is stored with the claim in SQLite so only its employee and assigned approver
-can retrieve it. Local extraction never calls an external service. Optional AI extraction is
+The raw attachment is never stored. Once the fields are extracted, the file is discarded and the
+claim keeps only the extracted values, the original filename, and a checksum, which the employee
+and the assigned approver see on the claim. Local extraction never calls an external service. Optional AI extraction is
 explicitly consent-based: images are sent to OpenAI vision, while PDFs send locally extracted
 text after common banking identifiers, long IDs, addresses, and emails are removed. Payment
 details and user identity are never included. Responses use `store=false`. The supplied example
@@ -183,7 +184,8 @@ pytest --cov=expense_approval
 
 The suite covers validation, routing, dual roles, access isolation, all transitions, mandatory
 rejection comments, concurrent decisions, document classification and extraction, attachment
-integrity and persistence, AI payload privacy, structured response parsing, fallback behavior,
+integrity, the OCR contract with Tesseract and Poppler, AI payload privacy, money parsing across
+separator styles, structured response parsing, fallback behavior,
 caching, sanitized OCR, dynamic AI document fields and category routing, editable payment-detail
 suggestions, and Streamlit workflow smoke tests.
 
