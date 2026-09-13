@@ -12,6 +12,7 @@ from decimal import Decimal, InvalidOperation
 from enum import StrEnum
 from pathlib import Path
 
+from PIL import Image, ImageFilter, ImageOps, UnidentifiedImageError
 from pypdf import PdfReader
 
 MAX_DOCUMENT_BYTES = 8 * 1024 * 1024
@@ -47,6 +48,7 @@ class DocumentExtraction:
     confidence: float
     processing_method: str
     warnings: tuple[str, ...]
+    routing_category: str | None = None
 
 
 @dataclass(frozen=True)
@@ -57,6 +59,7 @@ class ProcessedDocument:
     sha256: str
     content: bytes
     extraction: DocumentExtraction
+    extracted_text: str = ""
 
 
 def process_document(
@@ -86,6 +89,7 @@ def process_document(
         sha256=hashlib.sha256(content).hexdigest(),
         content=content,
         extraction=extraction,
+        extracted_text=_normalize_text(text)[:MAX_EXTRACTED_CHARACTERS],
     )
 
 
@@ -146,6 +150,7 @@ def analyze_document_text(
         confidence=confidence,
         processing_method=processing_method,
         warnings=tuple(warnings),
+        routing_category=category,
     )
 
 
@@ -219,10 +224,19 @@ def _ocr_pdf(content: bytes) -> str:
 def _ocr_image(content: bytes) -> str:
     if shutil.which("tesseract") is None:
         raise DocumentProcessingError("Local image OCR is unavailable on this deployment.")
+    prepared_content = _prepare_image_for_ocr(content)
     try:
         result = subprocess.run(
-            ["tesseract", "stdin", "stdout", "-l", "eng+ukr+pol+rus", "--psm", "6"],
-            input=content,
+            [
+                "tesseract",
+                "stdin",
+                "stdout",
+                "-l",
+                "spa+eng+ukr+pol+rus",
+                "--psm",
+                "11",
+            ],
+            input=prepared_content,
             capture_output=True,
             check=True,
             timeout=15,
@@ -235,6 +249,31 @@ def _ocr_image(content: bytes) -> str:
     if not text:
         raise DocumentProcessingError("No readable text was found in the image.")
     return text
+
+
+def _prepare_image_for_ocr(content: bytes) -> bytes:
+    try:
+        with Image.open(io.BytesIO(content)) as source:
+            source.load()
+            if source.width * source.height > 30_000_000:
+                raise DocumentProcessingError("The image dimensions are too large for OCR.")
+            image = ImageOps.exif_transpose(source).convert("L")
+    except DocumentProcessingError:
+        raise
+    except (Image.DecompressionBombError, UnidentifiedImageError, OSError) as exc:
+        raise DocumentProcessingError("The image could not be read safely.") from exc
+
+    longest_edge = max(image.size)
+    if longest_edge < 2_000:
+        scale = min(3.0, 2_000 / longest_edge)
+        image = image.resize(
+            (round(image.width * scale), round(image.height * scale)),
+            Image.Resampling.LANCZOS,
+        )
+    image = ImageOps.autocontrast(image).filter(ImageFilter.SHARPEN)
+    output = io.BytesIO()
+    image.save(output, format="PNG", optimize=True)
+    return output.getvalue()
 
 
 def _classify_document(searchable: str) -> tuple[DocumentKind, bool]:
@@ -261,7 +300,19 @@ def _classify_document(searchable: str) -> tuple[DocumentKind, bool]:
         return DocumentKind.BOARDING_PASS, True
     if any(marker in searchable for marker in ("receipt", "квитанц", "paragon")):
         return DocumentKind.RECEIPT, True
-    if any(marker in searchable for marker in ("рахунок", "invoice", "faktura", "акт-рахунок")):
+    if any(marker in searchable for marker in ("recibo", "comprobante de pago")):
+        return DocumentKind.RECEIPT, True
+    if any(
+        marker in searchable
+        for marker in (
+            "рахунок",
+            "invoice",
+            "faktura",
+            "акт-рахунок",
+            "factura",
+            "importe total",
+        )
+    ):
         return DocumentKind.INVOICE, True
     return DocumentKind.OTHER, False
 
@@ -326,7 +377,11 @@ def _extract_vendor(text: str, searchable: str) -> str | None:
         if marker in searchable:
             return display_name
 
-    pattern = re.compile(r"(?:Постачальник|Одержувач)\s*:?\s*([^\n]{3,160})", re.IGNORECASE)
+    pattern = re.compile(
+        r"(?:Постачальник|Одержувач|Raz[oó]n Social|Proveedor|Vendor)"
+        r"[ \t]*:?[ \t]*([^\n]{3,160})",
+        re.IGNORECASE,
+    )
     match = pattern.search(text)
     if not match:
         return None
@@ -338,6 +393,8 @@ def _extract_document_number(text: str) -> str | None:
     patterns = (
         r"(?:Рахунок(?:-акт| на оплату| за [^\n№]{0,60})?|Invoice)\s*№\s*([\w./-]+)",
         r"АКТ-РАХУНОК[^\n]{0,100}?№\s*([\w./-]+)",
+        r"Comp\.?\s*Nro\.?\s*:?\s*([\w./-]+)",
+        r"(?:Factura|Comprobante)\s*(?:Nro\.?|No\.?|#)\s*:?\s*([\w./-]+)",
     )
     for pattern in patterns:
         match = re.search(pattern, text, re.IGNORECASE)
@@ -362,17 +419,20 @@ def _extract_payable_amount(text: str) -> Decimal | None:
         r"загалом,?\s*враховуючи пдв та пф",
         r"враховуючи пдв та пф",
         r"total(?: amount| due)?",
+        r"importe total",
+        r"importe neto gravado",
         r"разом",
     )
     lines = [re.sub(r"\s+", " ", line).strip() for line in text.splitlines()]
     for label in labels:
         values: list[Decimal] = []
         pattern = re.compile(label, re.IGNORECASE)
-        for line in lines:
+        for index, line in enumerate(lines):
             match = pattern.search(line)
             if not match:
                 continue
-            for raw_value in MONEY_PATTERN.findall(line[match.end() :]):
+            value_text = " ".join((line[match.end() :], *lines[index + 1 : index + 3]))
+            for raw_value in MONEY_PATTERN.findall(value_text):
                 parsed = _parse_money(raw_value)
                 if parsed is not None:
                     values.append(parsed)
@@ -447,6 +507,7 @@ def _extract_expense_date(text: str) -> date | None:
         r"(?:Рахунок|Invoice)[^\n]{0,120}?(?:від|date)?\s*(\d{2}[./-]\d{2}[./-]\d{4})",
         r"Дата(?: формування)?[^:\n]{0,60}:?\s*(\d{2}[./-]\d{2}[./-]\d{4})",
         r"(?:від|dated?)\s*(\d{2}[./-]\d{2}[./-]\d{4})",
+        r"Fecha de Emisi[oó]n\s*:?\s*(\d{2}[./-]\d{2}[./-]\d{4})",
     )
     for pattern in numeric_patterns:
         match = re.search(pattern, text, re.IGNORECASE)
@@ -505,6 +566,8 @@ def _build_description(
         subject = "Internet or telecommunications services"
     elif "оренд" in searchable:
         subject = "Office rent and operating costs"
+    elif any(marker in searchable for marker in ("servicios", "comisi", "factura")):
+        subject = "Professional services invoice"
     elif kind == DocumentKind.RECEIPT:
         subject = f"{category} purchase receipt"
     else:
@@ -526,3 +589,29 @@ def _clean_filename(filename: str) -> str:
     if not clean:
         return "supporting-document"
     return clean[:255]
+
+
+def sanitize_document_text_for_ai(text: str) -> str:
+    """Remove common financial and personal identifiers before text-only AI analysis."""
+    sensitive_line_markers = (
+        "iban",
+        "swift",
+        "routing number",
+        "account number",
+        "bank account",
+        "card number",
+        "номер рахунку",
+        "банківські реквізити",
+        "domicilio comercial",
+        "cuit",
+        "tax id",
+    )
+    safe_lines = [
+        line
+        for line in _normalize_text(text).splitlines()
+        if not any(marker in line.casefold() for marker in sensitive_line_markers)
+    ]
+    sanitized = "\n".join(safe_lines)
+    sanitized = re.sub(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}", "[email redacted]", sanitized)
+    sanitized = re.sub(r"(?<!\d)\d{9,}(?!\d)", "[long identifier redacted]", sanitized)
+    return sanitized[:20_000]

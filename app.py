@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import sys
 from concurrent.futures import Future, ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date
 from pathlib import Path
 
@@ -15,6 +15,7 @@ import streamlit as st
 
 from expense_approval.ai import (
     AssessmentResult,
+    DocumentAnalysisResult,
     ExpenseAnalyzer,
     PaymentSuggestionResult,
     build_ai_payload,
@@ -45,7 +46,8 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-RESOURCE_CACHE_VERSION = "payment-suggestions-v1"
+RESOURCE_CACHE_VERSION = "dynamic-document-analysis-v1"
+DOCUMENT_PROCESSOR_VERSION = "multilingual-ocr-v1"
 
 
 @dataclass
@@ -119,8 +121,12 @@ def _streamlit_secrets() -> dict[str, object]:
 
 @st.cache_data(show_spinner=False, ttl=3600, max_entries=32)
 def _process_document_cached(
-    original_name: str, mime_type: str | None, content: bytes
+    processor_version: str,
+    original_name: str,
+    mime_type: str | None,
+    content: bytes,
 ) -> ProcessedDocument:
+    del processor_version
     return process_document(original_name, mime_type, content)
 
 
@@ -279,8 +285,8 @@ def render_claim_form(resources: AppResources, user_id: int) -> None:
             type=["pdf", "jpg", "jpeg", "png", "webp"],
             key=f"claim_document_{nonce}",
             help=(
-                "PDF or image, up to 8 MB. The file is processed locally and is not "
-                "sent to OpenAI."
+                "PDF or image, up to 8 MB. Local extraction runs first. Optional AI "
+                "analysis sends data to OpenAI only after explicit consent."
             ),
             max_upload_size=8,
         )
@@ -290,6 +296,7 @@ def render_claim_form(resources: AppResources, user_id: int) -> None:
             try:
                 with st.spinner("Reading the document locally…"):
                     document = _process_document_cached(
+                        DOCUMENT_PROCESSOR_VERSION,
                         uploaded_file.name,
                         uploaded_file.type,
                         uploaded_file.getvalue(),
@@ -299,14 +306,47 @@ def render_claim_form(resources: AppResources, user_id: int) -> None:
                     raise
                 document_error = str(exc)
                 st.error(document_error)
-            else:
-                _render_document_extraction(document)
+
+        document_token = document.sha256[:10] if document else "manual"
+        if document is not None:
+            analysis_key = f"_document_analysis_{nonce}_{document_token}"
+            analysis_result: DocumentAnalysisResult | None = st.session_state.get(
+                analysis_key
+            )
+            if analysis_result is not None:
+                document = replace(document, extraction=analysis_result.extraction)
+            _render_document_extraction(document, analysis_result)
+
+            consent = st.checkbox(
+                "I agree to send this document to OpenAI for AI field extraction.",
+                key=f"document_ai_consent_{nonce}_{document_token}",
+                help=(
+                    "Images are sent to OpenAI; PDFs use locally extracted text with common "
+                    "banking and personal identifiers removed."
+                ),
+            )
+            if st.button(
+                "Analyze or improve fields with AI",
+                key=f"document_ai_analyze_{nonce}_{document_token}",
+                disabled=not consent,
+                use_container_width=True,
+            ):
+                with st.spinner("Analyzing document fields with AI…"):
+                    st.session_state[analysis_key] = _analyze_document(
+                        resources, document, list(category_by_name)
+                    )
+                st.rerun()
 
         extraction = document.extraction if document else None
+        routing_hint = (
+            getattr(extraction, "routing_category", None) or extraction.category_hint
+            if extraction
+            else None
+        )
         suggested_category = (
-            extraction.category_hint
-            if extraction and extraction.category_hint in category_by_name
-            else next(iter(category_by_name))
+            routing_hint
+            if routing_hint in category_by_name
+            else "Other" if "Other" in category_by_name else next(iter(category_by_name))
         )
         suggested_amount = (
             float(extraction.amount)
@@ -319,7 +359,6 @@ def render_claim_form(resources: AppResources, user_id: int) -> None:
             else date.today()
         )
         suggested_description = extraction.description if extraction else ""
-        document_token = document.sha256[:10] if document else "manual"
         suggestion_key = f"_payment_suggestion_{nonce}_{document_token}"
         suggestion_revision_key = f"_payment_suggestion_revision_{nonce}_{document_token}"
         payment_suggestion: PaymentSuggestionResult | None = st.session_state.get(
@@ -436,7 +475,10 @@ def render_claim_form(resources: AppResources, user_id: int) -> None:
                 st.rerun()
 
 
-def _render_document_extraction(document: ProcessedDocument) -> None:
+def _render_document_extraction(
+    document: ProcessedDocument,
+    analysis_result: DocumentAnalysisResult | None = None,
+) -> None:
     extraction = document.extraction
     if extraction.is_expense_evidence:
         st.success(f"Recognized {extraction.kind.value.replace('_', ' ')}")
@@ -457,9 +499,17 @@ def _render_document_extraction(document: ProcessedDocument) -> None:
     columns[2].write(amount_label)
     columns[3].caption("SUGGESTED CATEGORY")
     columns[3].write(extraction.category_hint)
+    routing_category = getattr(extraction, "routing_category", None)
+    if routing_category and routing_category != extraction.category_hint:
+        columns[3].caption(f"Routes to: {routing_category}")
+    privacy_label = (
+        "AI analysis used with explicit consent"
+        if analysis_result and analysis_result.source == AssessmentSource.OPENAI
+        else "local extraction only"
+    )
     st.caption(
         f"{extraction.processing_method} · {round(extraction.confidence * 100)}% confidence · "
-        "raw document content is never sent to OpenAI"
+        f"{privacy_label}"
     )
     for warning in extraction.warnings:
         st.warning(warning)
@@ -752,6 +802,21 @@ def _suggest_payment_details(
             resources.settings.ai_timeout_seconds,
         )
     return resources.analyzer.suggest_payment_details(payload)
+
+
+def _analyze_document(
+    resources: AppResources,
+    document: ProcessedDocument,
+    routing_categories: list[str],
+) -> DocumentAnalysisResult:
+    """Run dynamic extraction and recover from a stale cached analyzer after deployment."""
+    if not hasattr(resources.analyzer, "analyze_document"):
+        resources.analyzer = ExpenseAnalyzer(
+            resources.settings.openai_api_key,
+            resources.settings.openai_model,
+            resources.settings.ai_timeout_seconds,
+        )
+    return resources.analyzer.analyze_document(document, routing_categories)
 
 
 if __name__ == "__main__":

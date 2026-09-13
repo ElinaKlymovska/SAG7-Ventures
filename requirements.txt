@@ -5,3 +5,4 @@ argon2-cffi==25.1.0
 openai==2.14.0
 pydantic==2.12.5
 pypdf==6.18.1
+Pillow==12.3.0

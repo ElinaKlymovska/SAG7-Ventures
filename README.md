@@ -19,7 +19,8 @@ configured, the app immediately remains usable and labels its deterministic fall
 - Mandatory rejection comments and owner-only withdrawal.
 - Object-level access checks in the service layer, not just UI filtering.
 - PDF, JPG, PNG, and WebP intake with embedded-text extraction and local OCR.
-- Deterministic evidence classification, field suggestions, and original-currency warnings.
+- Multilingual local OCR plus consent-based AI extraction for unfamiliar document layouts.
+- Dynamic vendor, document number, total, currency, date, and business-category suggestions.
 - Two-second live refresh for employee status and approver queues.
 - OpenAI Responses API integration with structured output.
 - Editable AI suggestion for a non-sensitive payment/reimbursement reference.
@@ -72,8 +73,9 @@ password because every account and claim is fictional and the deployment is a pu
 2. Confirm that the second employee's printer-toner claim is not visible.
 3. Open **New expense** and upload an invoice. Verify the suggested vendor, original total,
    category, date, and description. For a non-USD invoice, enter the converted USD amount
-   manually; the MVP never invents an exchange rate. Click **Suggest payment details with AI**,
-   review the non-sensitive reimbursement reference, and edit it if needed.
+   manually; the MVP never invents an exchange rate. For an unfamiliar layout, consent and click
+   **Analyze or improve fields with AI**. Then click **Suggest payment details with AI**, review
+   the non-sensitive reimbursement reference, and edit it if needed.
 4. Submit the expense, then open a second private browser window.
 5. Sign in there as `approver@expense-demo.local`; the claim appears within two seconds. Its
    supporting file is available only inside the authorized claim view.
@@ -89,25 +91,31 @@ password because every account and claim is fictional and the deployment is a pu
 
 The browser-provided filename and MIME type are treated as untrusted. The backend validates the
 file signature, applies an 8 MB and 25-page limit, and then extracts embedded PDF text or runs
-local Tesseract OCR. It recognizes common Ukrainian-language invoices as well as image-based
-travel documents.
+local Tesseract OCR with Spanish, English, Ukrainian, Polish, and Russian language data. Images
+are normalized, enlarged, contrast-adjusted, and sharpened before OCR.
 
 ```text
 upload → signature/size validation → local text extraction/OCR → evidence classification
-       → vendor / total / currency / date / category suggestions → employee review → submit
+       → optional consent-based AI extraction → dynamic fields + configured routing category
+       → employee review → submit
 ```
 
 Invoices and receipts are accepted; boarding passes are accepted with a manual-amount warning.
-Promotional graphics, resumes, policies/terms, unreadable files, and generic documents are
-rejected as evidence. Extraction is advisory: the employee reviews every field before
-submission. A detected UAH, PLN, or INR total is displayed in its original currency, but the
-employee must enter the correct USD claim amount because currency conversion is outside the MVP.
+Promotional graphics, resumes, policies/terms, unreadable files, and unrelated documents are
+rejected as evidence. AI can analyze unfamiliar languages and layouts, propose a free-form
+business category, and separately map it to one configured routing category. Missing source
+fields remain `Not found` rather than being invented. Extraction is advisory: the employee
+reviews every field before submission. A detected UAH, PLN, or INR total is displayed in its
+original currency, but the employee must enter the correct USD claim amount because currency
+conversion is outside the MVP.
 
 The raw attachment is stored with the claim in SQLite so only its employee and assigned approver
-can retrieve it. Document bytes, OCR text, payment details, account data, and user identity are
-never sent to OpenAI. The supplied example archive is intentionally not included in this public
-repository because it contains personal and payment information; automated tests use synthetic
-equivalents.
+can retrieve it. Local extraction never calls an external service. Optional AI extraction is
+explicitly consent-based: images are sent to OpenAI vision, while PDFs send locally extracted
+text after common banking identifiers, long IDs, addresses, and emails are removed. Payment
+details and user identity are never included. Responses use `store=false`. The supplied example
+archive is intentionally not included in this public repository because it contains personal and
+payment information; automated tests use synthetic equivalents.
 
 ## Architecture
 
@@ -115,6 +123,8 @@ equivalents.
 flowchart LR
     D[Document upload] --> X[Local parser / OCR]
     X --> UI[Streamlit UI]
+    X -. consent .-> DX[OpenAI document extraction]
+    DX --> UI
     UI --> S[ExpenseService]
     S --> DB[(SQLite / SQLAlchemy)]
     UI --> W[Background AI worker]
@@ -129,10 +139,10 @@ flowchart LR
   mutation checks the acting user again.
 - `src/expense_approval/documents.py` validates uploads, extracts text locally, classifies
   evidence, and produces reviewable field suggestions. It never calls an external service.
-- `src/expense_approval/ai.py` builds the only payload sent externally:
-  `amount_usd`, `category`, `description`, and `expense_date`. Payment details and user identity
-  are excluded. The same privacy-limited payload can generate an editable reimbursement-reference
-  suggestion; it never generates bank, card, routing, or transfer instructions.
+- `src/expense_approval/ai.py` has three bounded Structured Output flows. Approver assessment and
+  payment-reference suggestions receive only `amount_usd`, `category`, `description`, and
+  `expense_date`. Consent-based document extraction receives an image or sanitized OCR text plus
+  configured routing category names. It never receives existing payment details or user identity.
 - SQLAlchemy stores money as integer cents and Alembic owns the schema.
 - SQLite runs in WAL mode with a five-second busy timeout. Status decisions use an atomic
   conditional update, so a stale second decision cannot overwrite the first.
@@ -174,7 +184,8 @@ pytest --cov=expense_approval
 The suite covers validation, routing, dual roles, access isolation, all transitions, mandatory
 rejection comments, concurrent decisions, document classification and extraction, attachment
 integrity and persistence, AI payload privacy, structured response parsing, fallback behavior,
-caching, editable payment-detail suggestions, and Streamlit workflow smoke tests.
+caching, sanitized OCR, dynamic AI document fields and category routing, editable payment-detail
+suggestions, and Streamlit workflow smoke tests.
 
 ## Deploy to Streamlit Community Cloud
 

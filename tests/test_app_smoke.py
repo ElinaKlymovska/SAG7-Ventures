@@ -90,7 +90,7 @@ def test_payment_details_can_be_suggested_and_edited(
         field for field in app.text_area if field.label == "Payment details *"
     )
     assert payment_field.value.startswith(
-        "Reimbursement reference: Client Entertainment expense dated "
+        "Reimbursement reference: Other expense dated "
     )
     assert payment_field.value.endswith("for $25.00 USD.")
     payment_field.set_value("Edited demo reimbursement reference").run()

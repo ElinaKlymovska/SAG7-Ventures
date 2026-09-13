@@ -13,6 +13,7 @@ from expense_approval.documents import (
     ProcessedDocument,
     analyze_document_text,
     process_document,
+    sanitize_document_text_for_ai,
 )
 from expense_approval.services import AccessDeniedError, ExpenseService, ValidationError
 
@@ -72,6 +73,46 @@ def test_internet_invoice_routes_to_software_subscriptions() -> None:
     assert extraction.kind == DocumentKind.INVOICE
     assert extraction.category_hint == "Software/Subscriptions"
     assert extraction.amount == Decimal("300.00")
+
+
+def test_unknown_spanish_invoice_fields_are_extracted_without_vendor_allowlist() -> None:
+    extraction = analyze_document_text(
+        """
+        FACTURA
+        Punto de Venta: 00001
+        Comp. Nro: 00000047
+        Razón Social:
+        Fecha de Emisión: 01/08/2022
+        Servicios según contrato
+        Cesión de comisiones
+        Moneda: USD - Dólar Estadounidense
+        Importe Total: USD
+        11243,07
+        """,
+        "Comprobante-en-USd.jpg",
+        "local OCR",
+    )
+
+    assert extraction.kind == DocumentKind.INVOICE
+    assert extraction.is_expense_evidence is True
+    assert extraction.vendor is None
+    assert extraction.document_number == "00000047"
+    assert extraction.amount == Decimal("11243.07")
+    assert extraction.currency == "USD"
+    assert extraction.expense_date == date(2022, 8, 1)
+    assert extraction.category_hint == "Other"
+
+
+def test_document_text_is_sanitized_before_text_only_ai_analysis() -> None:
+    sanitized = sanitize_document_text_for_ai(
+        "Vendor: Example LLC\nIBAN: XX001234567890123456\n"
+        "Email: person@example.com\nInvoice 00000047\nTotal USD 25.00"
+    )
+
+    assert "Example LLC" in sanitized
+    assert "IBAN" not in sanitized
+    assert "person@example.com" not in sanitized
+    assert "00000047" in sanitized
 
 
 def test_boarding_pass_is_evidence_but_needs_manual_amount() -> None:

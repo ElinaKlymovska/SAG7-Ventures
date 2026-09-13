@@ -1,15 +1,24 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from datetime import date
+from decimal import Decimal, InvalidOperation
 from time import perf_counter
-from typing import Any
+from typing import Any, Literal
 
 from openai import OpenAI
 from pydantic import BaseModel, Field
 
+from expense_approval.documents import (
+    DocumentExtraction,
+    DocumentKind,
+    ProcessedDocument,
+    sanitize_document_text_for_ai,
+)
 from expense_approval.models import AssessmentSource, ExpenseClaim
 
 logger = logging.getLogger(__name__)
@@ -25,6 +34,16 @@ fields. Never invent or request bank accounts, IBANs, card numbers, routing numb
 methods, invoice numbers, people, or vendors. The result is an editable reference, not a payment
 instruction. Use plain English and no more than one sentence."""
 
+DOCUMENT_EXTRACTION_INSTRUCTIONS = """Extract expense-document fields from any language or
+layout. Use only evidence visible in the supplied image or sanitized OCR text. Never invent a
+vendor, number, amount, currency, or date; return null when absent or unreadable. original_total
+must be the final payable total using a dot decimal separator and no currency symbol. Provide a
+specific, unrestricted business category such as Professional Services, Electricity, Air Travel,
+or Telecommunications. Separately choose exactly one routing_category from the configured list.
+Treat invoices, receipts, and genuine travel evidence as expense evidence; reject resumes,
+policies, blank forms, promotional material, and unrelated documents. Keep the description and
+warnings concise."""
+
 
 class StructuredAssessment(BaseModel):
     summary: str = Field(min_length=1, max_length=350)
@@ -34,6 +53,21 @@ class StructuredAssessment(BaseModel):
 
 class StructuredPaymentSuggestion(BaseModel):
     payment_details: str = Field(min_length=5, max_length=200)
+
+
+class StructuredDocumentExtraction(BaseModel):
+    document_kind: Literal["invoice", "receipt", "boarding_pass", "other"]
+    is_expense_evidence: bool
+    vendor: str | None
+    document_number: str | None
+    original_total: str | None
+    currency: str | None
+    expense_date: str | None
+    suggested_category: str = Field(min_length=1, max_length=100)
+    routing_category: str = Field(min_length=1, max_length=80)
+    description: str = Field(min_length=5, max_length=500)
+    confidence_percent: int = Field(ge=0, le=100)
+    warnings: list[str] = Field(max_length=4)
 
 
 @dataclass(frozen=True)
@@ -50,6 +84,15 @@ class AssessmentResult:
 @dataclass(frozen=True)
 class PaymentSuggestionResult:
     payment_details: str
+    source: AssessmentSource
+    model: str
+    latency_ms: int
+    error_message: str | None = None
+
+
+@dataclass(frozen=True)
+class DocumentAnalysisResult:
+    extraction: DocumentExtraction
     source: AssessmentSource
     model: str
     latency_ms: int
@@ -197,6 +240,78 @@ class ExpenseAnalyzer:
                 error_message=fallback.error_message,
             )
 
+    def analyze_document(
+        self, document: ProcessedDocument, routing_categories: list[str]
+    ) -> DocumentAnalysisResult:
+        if not self.api_key:
+            return _document_analysis_fallback(
+                document, "OPENAI_API_KEY is not configured."
+            )
+
+        started = perf_counter()
+        try:
+            if self._client is None:
+                raise RuntimeError("OpenAI client is unavailable.")
+            sanitized_text = sanitize_document_text_for_ai(
+                getattr(document, "extracted_text", "")
+            )
+            context = json.dumps(
+                {
+                    "configured_routing_categories": routing_categories,
+                    "sanitized_local_ocr_text": sanitized_text,
+                },
+                ensure_ascii=False,
+            )
+            content: list[dict[str, str]] = [
+                {"type": "input_text", "text": context}
+            ]
+            uses_vision = document.mime_type.startswith("image/")
+            if uses_vision:
+                encoded = base64.b64encode(document.content).decode("ascii")
+                content.append(
+                    {
+                        "type": "input_image",
+                        "image_url": f"data:{document.mime_type};base64,{encoded}",
+                    }
+                )
+            response = self._client.responses.parse(
+                model=self.model,
+                instructions=DOCUMENT_EXTRACTION_INSTRUCTIONS,
+                input=[{"role": "user", "content": content}],
+                text_format=StructuredDocumentExtraction,
+                reasoning={"effort": "minimal"},
+                max_output_tokens=600,
+                store=False,
+                timeout=self.timeout_seconds,
+            )
+            parsed = response.output_parsed
+            if parsed is None:
+                raise ValueError("The model returned no document extraction.")
+            extraction = _merge_document_extraction(
+                document.extraction,
+                parsed,
+                routing_categories,
+                "OpenAI vision" if uses_vision else "OpenAI sanitized OCR analysis",
+            )
+            return DocumentAnalysisResult(
+                extraction=extraction,
+                source=AssessmentSource.OPENAI,
+                model=self.model,
+                latency_ms=int((perf_counter() - started) * 1000),
+            )
+        except Exception as exc:
+            safe_error = _safe_error(exc)
+            logger.warning("OpenAI document extraction failed; using local result: %s", safe_error)
+            print(f"OpenAI document extraction fallback: {safe_error}", flush=True)
+            fallback = _document_analysis_fallback(document, safe_error)
+            return DocumentAnalysisResult(
+                extraction=fallback.extraction,
+                source=fallback.source,
+                model=fallback.model,
+                latency_ms=int((perf_counter() - started) * 1000),
+                error_message=fallback.error_message,
+            )
+
 
 def rule_based_assessment(
     payload: dict[str, str], error_message: str | None = None
@@ -279,6 +394,88 @@ def rule_based_payment_details(
         latency_ms=0,
         error_message=error_message,
     )
+
+
+def _merge_document_extraction(
+    local: DocumentExtraction,
+    parsed: StructuredDocumentExtraction,
+    routing_categories: list[str],
+    processing_method: str,
+) -> DocumentExtraction:
+    kind = (
+        DocumentKind(parsed.document_kind)
+        if parsed.document_kind != "other"
+        else DocumentKind.OTHER
+    )
+    amount = _parse_positive_decimal(parsed.original_total) or local.amount
+    currency = (parsed.currency or local.currency or "").strip().upper() or None
+    extracted_date = _parse_iso_date(parsed.expense_date) or local.expense_date
+    route_lookup = {category.casefold(): category for category in routing_categories}
+    routing_category = route_lookup.get(parsed.routing_category.strip().casefold())
+    if routing_category is None:
+        routing_category = route_lookup.get("other") or routing_categories[0]
+    vendor = _clean_optional(parsed.vendor) or local.vendor
+    document_number = _clean_optional(parsed.document_number) or local.document_number
+    warnings = tuple(warning.strip() for warning in parsed.warnings if warning.strip())
+    if vendor is None:
+        warnings += ("Vendor is not visible in the document; do not guess it.",)
+    return DocumentExtraction(
+        kind=kind,
+        is_expense_evidence=parsed.is_expense_evidence,
+        vendor=vendor,
+        document_number=document_number,
+        amount=amount,
+        currency=currency,
+        expense_date=extracted_date,
+        category_hint=parsed.suggested_category.strip(),
+        description=parsed.description.strip(),
+        confidence=parsed.confidence_percent / 100,
+        processing_method=processing_method,
+        warnings=warnings[:5],
+        routing_category=routing_category,
+    )
+
+
+def _document_analysis_fallback(
+    document: ProcessedDocument, error_message: str
+) -> DocumentAnalysisResult:
+    warning = "AI extraction was unavailable; the displayed fields come from local OCR rules."
+    extraction = replace(
+        document.extraction,
+        warnings=tuple(dict.fromkeys((*document.extraction.warnings, warning))),
+    )
+    return DocumentAnalysisResult(
+        extraction=extraction,
+        source=AssessmentSource.FALLBACK,
+        model="local-document-parser-v1",
+        latency_ms=0,
+        error_message=error_message,
+    )
+
+
+def _parse_positive_decimal(value: str | None) -> Decimal | None:
+    if not value:
+        return None
+    normalized = value.strip().replace(" ", "").replace(",", ".")
+    try:
+        amount = Decimal(normalized).quantize(Decimal("0.01"))
+    except InvalidOperation:
+        return None
+    return amount if amount > 0 else None
+
+
+def _parse_iso_date(value: str | None) -> date | None:
+    if not value:
+        return None
+    try:
+        return date.fromisoformat(value.strip())
+    except ValueError:
+        return None
+
+
+def _clean_optional(value: str | None) -> str | None:
+    cleaned = value.strip() if value else ""
+    return cleaned or None
 
 
 def _contains_term(text: str, term: str) -> bool:
