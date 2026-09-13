@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import sys
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, replace
@@ -46,8 +47,13 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-RESOURCE_CACHE_VERSION = "dynamic-document-analysis-v1"
+RESOURCE_CACHE_VERSION = "background-document-ocr-v1"
 DOCUMENT_PROCESSOR_VERSION = "multiline-invoice-fields-v2"
+DOCUMENT_JOBS_KEY = "_document_jobs"
+DOCUMENT_RESULTS_KEY = "_document_results"
+# One 8 MB document per entry, so this cap is what keeps a session from growing
+# without bound as the employee tries one file after another.
+MAX_CACHED_DOCUMENTS = 8
 
 
 @dataclass
@@ -57,6 +63,7 @@ class AppResources:
     service: ExpenseService
     analyzer: ExpenseAnalyzer
     executor: ThreadPoolExecutor
+    document_executor: ThreadPoolExecutor
 
 
 @st.cache_resource
@@ -75,6 +82,10 @@ def get_resources(settings: Settings, cache_version: str) -> AppResources:
             settings.ai_timeout_seconds,
         ),
         executor=ThreadPoolExecutor(max_workers=4, thread_name_prefix="expense-ai"),
+        # A separate pool so a slow OCR run cannot starve the approver assessments.
+        document_executor=ThreadPoolExecutor(
+            max_workers=2, thread_name_prefix="expense-ocr"
+        ),
     )
 
 
@@ -119,15 +130,69 @@ def _streamlit_secrets() -> dict[str, object]:
         return {}
 
 
-@st.cache_data(show_spinner=False, ttl=3600, max_entries=32)
-def _process_document_cached(
-    processor_version: str,
+@dataclass(frozen=True)
+class DocumentJobState:
+    """What the claim form knows about one document right now."""
+
+    document: ProcessedDocument | None
+    error: str | None
+    pending: bool
+
+
+def _document_job_state(
+    resources: AppResources,
+    digest: str,
     original_name: str,
     mime_type: str | None,
     content: bytes,
-) -> ProcessedDocument:
-    del processor_version
-    return process_document(original_name, mime_type, content)
+) -> DocumentJobState:
+    """Read a document in the background so OCR never blocks the Streamlit script.
+
+    Results are cached by hand rather than with @st.cache_data because the work runs
+    in a worker thread, which has no Streamlit script context.
+    """
+    key = f"{DOCUMENT_PROCESSOR_VERSION}:{digest}"
+    results: dict[str, DocumentJobState] = st.session_state.setdefault(
+        DOCUMENT_RESULTS_KEY, {}
+    )
+    finished = results.get(key)
+    if finished is not None:
+        return finished
+
+    jobs: dict[str, Future[ProcessedDocument]] = st.session_state.setdefault(
+        DOCUMENT_JOBS_KEY, {}
+    )
+    job = jobs.get(key)
+    if job is None:
+        job = resources.document_executor.submit(
+            process_document, original_name, mime_type, content
+        )
+        jobs[key] = job
+    if not job.done():
+        return DocumentJobState(None, None, True)
+
+    jobs.pop(key, None)
+    try:
+        results[key] = DocumentJobState(job.result(), None, False)
+    except Exception as exc:
+        if not _is_user_safe_error(exc):
+            raise
+        results[key] = DocumentJobState(None, str(exc), False)
+    while len(results) > MAX_CACHED_DOCUMENTS:
+        results.pop(next(iter(results)))
+    return results[key]
+
+
+@st.fragment(run_every="1s")
+def _render_document_progress(digest: str) -> None:
+    """Poll the background reader and refresh the page once it finishes."""
+    job = st.session_state.get(DOCUMENT_JOBS_KEY, {}).get(
+        f"{DOCUMENT_PROCESSOR_VERSION}:{digest}"
+    )
+    if job is None or job.done():
+        st.rerun(scope="app")
+    st.info("Reading the document locally… Submitting unlocks when it finishes.")
+    st.caption("Scanned files run OCR, which can take up to a minute.")
 
 
 def render_login(resources: AppResources) -> None:
@@ -215,7 +280,7 @@ def render_login(resources: AppResources) -> None:
             confirmed = st.checkbox("I understand that all current demo changes will be erased.")
             if st.button("Reset now", disabled=not confirmed, use_container_width=True):
                 reset_demo_data(resources.database)
-                st.session_state.pop("_ai_jobs", None)
+                _clear_background_jobs()
                 _set_flash("success", "Demo data has been restored.")
                 st.rerun()
 
@@ -292,22 +357,30 @@ def render_claim_form(resources: AppResources, user_id: int) -> None:
         )
         document: ProcessedDocument | None = None
         document_error: str | None = None
+        document_pending = False
+        # Hashing the upload is instant, so the form keys below never wait for OCR.
+        document_token = (
+            hashlib.sha256(uploaded_file.getvalue()).hexdigest()[:10]
+            if uploaded_file is not None
+            else "manual"
+        )
         if uploaded_file is not None:
-            try:
-                with st.spinner("Reading the document locally…"):
-                    document = _process_document_cached(
-                        DOCUMENT_PROCESSOR_VERSION,
-                        uploaded_file.name,
-                        uploaded_file.type,
-                        uploaded_file.getvalue(),
-                    )
-            except Exception as exc:
-                if not _is_user_safe_error(exc):
-                    raise
-                document_error = str(exc)
+            state = _document_job_state(
+                resources,
+                document_token,
+                uploaded_file.name,
+                uploaded_file.type,
+                uploaded_file.getvalue(),
+            )
+            document, document_error, document_pending = (
+                state.document,
+                state.error,
+                state.pending,
+            )
+            if document_pending:
+                _render_document_progress(document_token)
+            elif document_error:
                 st.error(document_error)
-
-        document_token = document.sha256[:10] if document else "manual"
         if document is not None:
             analysis_key = f"_document_analysis_{nonce}_{document_token}"
             analysis_result: DocumentAnalysisResult | None = st.session_state.get(
@@ -432,6 +505,7 @@ def render_claim_form(resources: AppResources, user_id: int) -> None:
             actions = st.columns(2)
             action_is_disabled = bool(
                 document_error
+                or document_pending
                 or (document and not document.extraction.is_expense_evidence)
             )
             suggest_requested = actions[0].form_submit_button(
@@ -768,12 +842,18 @@ def _display_assessment(assessment: StoredAssessment) -> None:
     st.caption(f"{source_label} · Advisory only — no decision was made automatically.")
 
 
+def _clear_background_jobs() -> None:
+    """Drop every pending future and cached result the session was holding."""
+    for key in ("_ai_jobs", DOCUMENT_JOBS_KEY, DOCUMENT_RESULTS_KEY):
+        st.session_state.pop(key, None)
+
+
 def _sign_out() -> None:
+    _clear_background_jobs()
     for key in (
         "user_id",
         "role_view",
         "selected_approval_claim",
-        "_ai_jobs",
         "employee_status_filter",
         "queue_category_filter",
     ):
