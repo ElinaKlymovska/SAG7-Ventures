@@ -275,9 +275,9 @@ class ExpenseService:
         if decision not in {ExpenseStatus.APPROVED, ExpenseStatus.REJECTED}:
             raise ValidationError("Decision must be approved or rejected.")
         clean_comment = (comment or "").strip()
-        if decision == ExpenseStatus.REJECTED and not clean_comment:
-            raise ValidationError("A rejection comment is required.")
-        if len(clean_comment) > 500:
+        if decision == ExpenseStatus.REJECTED:
+            clean_comment = self._validate_text(clean_comment, "Rejection comment", 10, 500)
+        elif len(clean_comment) > 500:
             raise ValidationError("Decision comment must be 500 characters or fewer.")
 
         with self.database.session() as session:

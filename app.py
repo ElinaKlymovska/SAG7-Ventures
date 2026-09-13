@@ -730,7 +730,7 @@ def render_approver_detail(
         with st.form(f"decision_{claim.id}"):
             comment = st.text_area(
                 "Decision comment",
-                placeholder="Required for rejection; optional for approval",
+                placeholder="Required for rejection (10+ characters); optional for approval",
                 max_chars=500,
             )
             approve_column, reject_column = st.columns(2)
