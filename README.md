@@ -22,6 +22,7 @@ configured, the app immediately remains usable and labels its deterministic fall
 - Deterministic evidence classification, field suggestions, and original-currency warnings.
 - Two-second live refresh for employee status and approver queues.
 - OpenAI Responses API integration with structured output.
+- Editable AI suggestion for a non-sensitive payment/reimbursement reference.
 - Rule-based fallback and cached assessments.
 - Fictional seed data, reset control, migrations, tests, and CI.
 
@@ -71,7 +72,8 @@ password because every account and claim is fictional and the deployment is a pu
 2. Confirm that the second employee's printer-toner claim is not visible.
 3. Open **New expense** and upload an invoice. Verify the suggested vendor, original total,
    category, date, and description. For a non-USD invoice, enter the converted USD amount
-   manually; the MVP never invents an exchange rate.
+   manually; the MVP never invents an exchange rate. Click **Suggest payment details with AI**,
+   review the non-sensitive reimbursement reference, and edit it if needed.
 4. Submit the expense, then open a second private browser window.
 5. Sign in there as `approver@expense-demo.local`; the claim appears within two seconds. Its
    supporting file is available only inside the authorized claim view.
@@ -129,7 +131,8 @@ flowchart LR
   evidence, and produces reviewable field suggestions. It never calls an external service.
 - `src/expense_approval/ai.py` builds the only payload sent externally:
   `amount_usd`, `category`, `description`, and `expense_date`. Payment details and user identity
-  are excluded.
+  are excluded. The same privacy-limited payload can generate an editable reimbursement-reference
+  suggestion; it never generates bank, card, routing, or transfer instructions.
 - SQLAlchemy stores money as integer cents and Alembic owns the schema.
 - SQLite runs in WAL mode with a five-second busy timeout. Status decisions use an atomic
   conditional update, so a stale second decision cannot overwrite the first.
@@ -171,7 +174,7 @@ pytest --cov=expense_approval
 The suite covers validation, routing, dual roles, access isolation, all transitions, mandatory
 rejection comments, concurrent decisions, document classification and extraction, attachment
 integrity and persistence, AI payload privacy, structured response parsing, fallback behavior,
-caching, and a Streamlit login-page smoke test.
+caching, editable payment-detail suggestions, and Streamlit workflow smoke tests.
 
 ## Deploy to Streamlit Community Cloud
 

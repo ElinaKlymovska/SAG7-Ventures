@@ -19,6 +19,12 @@ short sentences and identify only clear inconsistencies between amount, category
 Never recommend approval or rejection. Never invent policy, receipts, names, or payment details.
 Keep reasons short and return an empty reasons list when the claim is internally consistent."""
 
+PAYMENT_DETAILS_INSTRUCTIONS = """Create one concise, non-sensitive reimbursement reference for
+an employee expense claim. Describe what the reimbursement is for using only the supplied claim
+fields. Never invent or request bank accounts, IBANs, card numbers, routing numbers, payment
+methods, invoice numbers, people, or vendors. The result is an editable reference, not a payment
+instruction. Use plain English and no more than one sentence."""
+
 
 class StructuredAssessment(BaseModel):
     summary: str = Field(min_length=1, max_length=350)
@@ -26,11 +32,24 @@ class StructuredAssessment(BaseModel):
     reasons: list[str] = Field(default_factory=list, max_length=3)
 
 
+class StructuredPaymentSuggestion(BaseModel):
+    payment_details: str = Field(min_length=5, max_length=200)
+
+
 @dataclass(frozen=True)
 class AssessmentResult:
     summary: str
     is_inconsistent: bool
     reasons: list[str]
+    source: AssessmentSource
+    model: str
+    latency_ms: int
+    error_message: str | None = None
+
+
+@dataclass(frozen=True)
+class PaymentSuggestionResult:
+    payment_details: str
     source: AssessmentSource
     model: str
     latency_ms: int
@@ -50,6 +69,18 @@ def build_ai_payload(claim: ExpenseClaim) -> dict[str, str]:
 def payload_hash(payload: dict[str, str]) -> str:
     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def build_payment_details_payload(
+    *, amount_usd: str, category: str, description: str, expense_date: str
+) -> dict[str, str]:
+    """Return the complete privacy-limited payload for an employee-facing suggestion."""
+    return {
+        "amount_usd": amount_usd,
+        "category": category,
+        "description": description,
+        "expense_date": expense_date,
+    }
 
 
 class ExpenseAnalyzer:
@@ -113,6 +144,53 @@ class ExpenseAnalyzer:
                 summary=fallback.summary,
                 is_inconsistent=fallback.is_inconsistent,
                 reasons=fallback.reasons,
+                source=fallback.source,
+                model=fallback.model,
+                latency_ms=int((perf_counter() - started) * 1000),
+                error_message=fallback.error_message,
+            )
+
+    def suggest_payment_details(
+        self, payload: dict[str, str]
+    ) -> PaymentSuggestionResult:
+        if not self.api_key:
+            return rule_based_payment_details(
+                payload, "OPENAI_API_KEY is not configured."
+            )
+
+        started = perf_counter()
+        try:
+            if self._client is None:
+                raise RuntimeError("OpenAI client is unavailable.")
+            response = self._client.responses.parse(
+                model=self.model,
+                instructions=PAYMENT_DETAILS_INSTRUCTIONS,
+                input=json.dumps(payload, ensure_ascii=False),
+                text_format=StructuredPaymentSuggestion,
+                reasoning={"effort": "minimal"},
+                max_output_tokens=100,
+                store=False,
+                timeout=self.timeout_seconds,
+            )
+            parsed = response.output_parsed
+            if parsed is None:
+                raise ValueError("The model returned no payment-details suggestion.")
+            suggestion = parsed.payment_details.strip()
+            if not _is_safe_payment_suggestion(suggestion):
+                raise ValueError("The model returned an unsafe payment-details suggestion.")
+            return PaymentSuggestionResult(
+                payment_details=suggestion,
+                source=AssessmentSource.OPENAI,
+                model=self.model,
+                latency_ms=int((perf_counter() - started) * 1000),
+            )
+        except Exception as exc:
+            safe_error = _safe_error(exc)
+            logger.warning("OpenAI payment suggestion failed; using fallback: %s", safe_error)
+            print(f"OpenAI payment suggestion fallback: {safe_error}", flush=True)
+            fallback = rule_based_payment_details(payload, safe_error)
+            return PaymentSuggestionResult(
+                payment_details=fallback.payment_details,
                 source=fallback.source,
                 model=fallback.model,
                 latency_ms=int((perf_counter() - started) * 1000),
@@ -185,6 +263,24 @@ def rule_based_assessment(
     )
 
 
+def rule_based_payment_details(
+    payload: dict[str, str], error_message: str | None = None
+) -> PaymentSuggestionResult:
+    amount = _safe_float(payload["amount_usd"])
+    amount_phrase = f" for ${amount:,.2f} USD" if amount > 0 else ""
+    payment_details = (
+        f"Reimbursement reference: {payload['category']} expense dated "
+        f"{payload['expense_date']}{amount_phrase}."
+    )
+    return PaymentSuggestionResult(
+        payment_details=payment_details,
+        source=AssessmentSource.FALLBACK,
+        model="rule-engine-v1",
+        latency_ms=0,
+        error_message=error_message,
+    )
+
+
 def _contains_term(text: str, term: str) -> bool:
     return f" {term} " in text or f" {term}s " in text
 
@@ -194,6 +290,21 @@ def _safe_float(value: Any) -> float:
         return float(value)
     except (TypeError, ValueError):
         return 0.0
+
+
+def _is_safe_payment_suggestion(value: str) -> bool:
+    normalized = value.casefold()
+    sensitive_markers = (
+        "account number",
+        "bank account",
+        "card number",
+        "routing number",
+        "swift code",
+        "iban",
+    )
+    return 5 <= len(value) <= 200 and not any(
+        marker in normalized for marker in sensitive_markers
+    )
 
 
 def _safe_error(exc: Exception) -> str:

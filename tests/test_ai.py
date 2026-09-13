@@ -5,9 +5,12 @@ from types import SimpleNamespace
 from expense_approval.ai import (
     ExpenseAnalyzer,
     StructuredAssessment,
+    StructuredPaymentSuggestion,
     build_ai_payload,
+    build_payment_details_payload,
     payload_hash,
     rule_based_assessment,
+    rule_based_payment_details,
 )
 from expense_approval.models import AssessmentSource
 from expense_approval.services import ExpenseService
@@ -97,6 +100,86 @@ def test_openai_structured_response_is_parsed(monkeypatch: object) -> None:
         "timeout": 4.0,
     }
     assert "payment_details" not in str(captured["input"])
+
+
+def test_payment_suggestion_uses_only_existing_safe_claim_fields(
+    monkeypatch: object,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeResponses:
+        def parse(self, **kwargs: object) -> SimpleNamespace:
+            captured.update(kwargs)
+            return SimpleNamespace(
+                output_parsed=StructuredPaymentSuggestion(
+                    payment_details="Reimbursement reference: Office supplies, $25.00 USD."
+                )
+            )
+
+    class FakeOpenAI:
+        def __init__(self, **_kwargs: object):
+            self.responses = FakeResponses()
+
+    monkeypatch.setattr("expense_approval.ai.OpenAI", FakeOpenAI)
+    payload = build_payment_details_payload(
+        amount_usd="25.00",
+        category="Office",
+        description="Office supplies for the demo",
+        expense_date="2026-09-13",
+    )
+    result = ExpenseAnalyzer("test-key", "gpt-5-mini").suggest_payment_details(payload)
+
+    assert set(payload) == {"amount_usd", "category", "description", "expense_date"}
+    assert result.source == AssessmentSource.OPENAI
+    assert result.payment_details.startswith("Reimbursement reference")
+    assert captured["text_format"] is StructuredPaymentSuggestion
+    assert captured["store"] is False
+    assert captured["max_output_tokens"] == 100
+    assert "payment_details" not in str(captured["input"])
+    assert "bank" not in str(captured["input"]).lower()
+
+
+def test_payment_suggestion_fallback_is_labeled_and_safe() -> None:
+    payload = build_payment_details_payload(
+        amount_usd="25.00",
+        category="Office",
+        description="Office supplies for the demo",
+        expense_date="2026-09-13",
+    )
+    result = ExpenseAnalyzer(None, "gpt-5-mini").suggest_payment_details(payload)
+    direct_fallback = rule_based_payment_details(payload)
+
+    assert result.source == AssessmentSource.FALLBACK
+    assert result.model == "rule-engine-v1"
+    assert "OPENAI_API_KEY" in (result.error_message or "")
+    assert result.payment_details == direct_fallback.payment_details
+
+
+def test_unsafe_ai_payment_suggestion_falls_back(monkeypatch: object) -> None:
+    class FakeResponses:
+        def parse(self, **_kwargs: object) -> SimpleNamespace:
+            return SimpleNamespace(
+                output_parsed=StructuredPaymentSuggestion(
+                    payment_details="Transfer to bank account number 123456789."
+                )
+            )
+
+    class FakeOpenAI:
+        def __init__(self, **_kwargs: object):
+            self.responses = FakeResponses()
+
+    monkeypatch.setattr("expense_approval.ai.OpenAI", FakeOpenAI)
+    payload = build_payment_details_payload(
+        amount_usd="25.00",
+        category="Office",
+        description="Office supplies for the demo",
+        expense_date="2026-09-13",
+    )
+    result = ExpenseAnalyzer("test-key", "gpt-5-mini").suggest_payment_details(payload)
+
+    assert result.source == AssessmentSource.FALLBACK
+    assert "bank account" not in result.payment_details.lower()
+    assert "unsafe" in (result.error_message or "")
 
 
 def test_openai_client_is_reused_between_assessments(monkeypatch: object) -> None:

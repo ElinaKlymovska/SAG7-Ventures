@@ -13,7 +13,14 @@ if str(SRC_PATH) not in sys.path:
 
 import streamlit as st
 
-from expense_approval.ai import AssessmentResult, ExpenseAnalyzer, build_ai_payload, payload_hash
+from expense_approval.ai import (
+    AssessmentResult,
+    ExpenseAnalyzer,
+    PaymentSuggestionResult,
+    build_ai_payload,
+    build_payment_details_payload,
+    payload_hash,
+)
 from expense_approval.config import Settings, load_settings
 from expense_approval.db import Database
 from expense_approval.documents import (
@@ -310,6 +317,12 @@ def render_claim_form(resources: AppResources, user_id: int) -> None:
         )
         suggested_description = extraction.description if extraction else ""
         document_token = document.sha256[:10] if document else "manual"
+        suggestion_key = f"_payment_suggestion_{nonce}_{document_token}"
+        suggestion_revision_key = f"_payment_suggestion_revision_{nonce}_{document_token}"
+        payment_suggestion: PaymentSuggestionResult | None = st.session_state.get(
+            suggestion_key
+        )
+        suggestion_revision = int(st.session_state.get(suggestion_revision_key, 0))
 
         with st.form(f"claim_form_{nonce}_{document_token}"):
             first, second = st.columns(2)
@@ -338,24 +351,61 @@ def render_claim_form(resources: AppResources, user_id: int) -> None:
             )
             payment_details = st.text_area(
                 "Payment details *",
+                value=(
+                    payment_suggestion.payment_details if payment_suggestion else ""
+                ),
                 placeholder="Demo reimbursement reference only — do not enter real bank details",
                 max_chars=500,
+                key=f"payment_details_{nonce}_{document_token}_{suggestion_revision}",
             )
+            if payment_suggestion:
+                suggestion_source = (
+                    f"AI suggestion · {payment_suggestion.model}"
+                    if payment_suggestion.source == AssessmentSource.OPENAI
+                    else "Rule-based suggestion · OpenAI unavailable"
+                )
+                st.caption(f"{suggestion_source} · Review and edit before submitting.")
             st.warning("Demo environment: never enter real banking or card information.")
             extraction_confirmed = True
             if document is not None and document.extraction.is_expense_evidence:
                 extraction_confirmed = st.checkbox(
                     "I reviewed the extracted fields and entered the correct USD amount."
                 )
-            submitted = st.form_submit_button(
+            actions = st.columns(2)
+            action_is_disabled = bool(
+                document_error
+                or (document and not document.extraction.is_expense_evidence)
+            )
+            suggest_requested = actions[0].form_submit_button(
+                "Suggest payment details with AI",
+                use_container_width=True,
+                disabled=action_is_disabled,
+            )
+            submitted = actions[1].form_submit_button(
                 "Submit for approval",
                 type="primary",
                 use_container_width=True,
-                disabled=bool(
-                    document_error
-                    or (document and not document.extraction.is_expense_evidence)
-                ),
+                disabled=action_is_disabled,
             )
+        if suggest_requested:
+            if amount <= 0:
+                st.error("Enter the correct USD amount before requesting an AI suggestion.")
+                return
+            if len(description.strip()) < 10:
+                st.error("Enter a description of at least 10 characters first.")
+                return
+            suggestion_payload = build_payment_details_payload(
+                amount_usd=f"{amount:.2f}",
+                category=category_name,
+                description=description.strip(),
+                expense_date=expense_date.isoformat(),
+            )
+            with st.spinner("Creating a safe payment reference…"):
+                st.session_state[suggestion_key] = (
+                    resources.analyzer.suggest_payment_details(suggestion_payload)
+                )
+            st.session_state[suggestion_revision_key] = suggestion_revision + 1
+            st.rerun()
         if submitted:
             if not extraction_confirmed:
                 st.error("Review and confirm the document extraction before submitting.")

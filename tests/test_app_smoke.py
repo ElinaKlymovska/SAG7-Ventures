@@ -62,6 +62,43 @@ def test_claim_validation_is_rendered_without_app_error(
     )
 
 
+def test_payment_details_can_be_suggested_and_edited(
+    tmp_path: Path, monkeypatch: object
+) -> None:
+    database_url = f"sqlite:///{tmp_path / 'payment-suggestion-ui.sqlite3'}"
+    monkeypatch.setenv("DATABASE_URL", database_url)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    app_path = Path(__file__).resolve().parents[1] / "app.py"
+    app = AppTest.from_file(str(app_path), default_timeout=15).run()
+
+    next(button for button in app.button if button.label == "Employee").click().run()
+    next(button for button in app.button if button.label == "Sign in").click().run()
+    next(field for field in app.number_input if field.label == "Amount (USD) *").set_value(
+        25.00
+    ).run()
+    next(field for field in app.text_area if field.label == "Description *").set_value(
+        "Office supplies for the demo"
+    ).run()
+    next(
+        button
+        for button in app.button
+        if button.label == "Suggest payment details with AI"
+    ).click().run()
+
+    assert not app.exception
+    payment_field = next(
+        field for field in app.text_area if field.label == "Payment details *"
+    )
+    assert payment_field.value.startswith(
+        "Reimbursement reference: Client Entertainment expense dated "
+    )
+    assert payment_field.value.endswith("for $25.00 USD.")
+    payment_field.set_value("Edited demo reimbursement reference").run()
+    assert next(
+        field for field in app.text_area if field.label == "Payment details *"
+    ).value == "Edited demo reimbursement reference"
+
+
 def test_dual_role_user_can_switch_workspaces(
     tmp_path: Path, monkeypatch: object
 ) -> None:
