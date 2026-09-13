@@ -263,6 +263,32 @@ def test_document_ai_failure_keeps_local_extraction(monkeypatch: object) -> None
     assert any("local OCR" in warning for warning in result.extraction.warnings)
 
 
+def test_client_creation_failure_degrades_to_fallback(monkeypatch: object) -> None:
+    class ExplodingOpenAI:
+        def __init__(self, **_kwargs: object):
+            raise RuntimeError("client init failed")
+
+    monkeypatch.setattr("expense_approval.ai.OpenAI", ExplodingOpenAI)
+    analyzer = ExpenseAnalyzer("test-key", "gpt-5-mini")
+
+    assert analyzer.openai_enabled is False
+
+    result = analyzer.analyze(
+        {
+            "amount_usd": "780.00",
+            "category": "Office",
+            "description": MISMATCH_DESCRIPTION,
+            "expense_date": "2026-01-05",
+        }
+    )
+    assert result.source == AssessmentSource.FALLBACK
+
+    document = _unknown_image_document()
+    document_result = analyzer.analyze_document(document, ["Office", "Other"])
+    assert document_result.source == AssessmentSource.FALLBACK
+    assert document_result.extraction.processing_method == "local OCR"
+
+
 def _unknown_image_document() -> ProcessedDocument:
     local_extraction = DocumentExtraction(
         kind=DocumentKind.INVOICE,

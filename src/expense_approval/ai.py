@@ -134,15 +134,20 @@ class ExpenseAnalyzer:
         # Reuse one HTTP connection pool for the lifetime of the cached Streamlit
         # resource. Creating a client for every assessment adds DNS/TLS overhead
         # and made the previous four-second request budget unreliable.
-        self._client = (
-            OpenAI(api_key=api_key, max_retries=0, timeout=timeout_seconds)
-            if api_key
-            else None
-        )
+        self._client = None
+        self._client_error: str | None = None
+        if api_key:
+            try:
+                self._client = OpenAI(api_key=api_key, max_retries=0, timeout=timeout_seconds)
+            except Exception as exc:
+                # A broken SDK install or hostile proxy settings must degrade the AI
+                # panel to the rule-based fallback, not take the whole app down.
+                self._client_error = f"{type(exc).__name__}: {exc}"
+                logger.warning("OpenAI client unavailable; using fallback: %s", self._client_error)
 
     @property
     def openai_enabled(self) -> bool:
-        return bool(self.api_key)
+        return self._client is not None
 
     def analyze(self, payload: dict[str, str]) -> AssessmentResult:
         if not self.api_key:
