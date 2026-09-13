@@ -346,9 +346,10 @@ def render_claim_form(resources: AppResources, user_id: int) -> None:
                 disabled=not consent,
                 use_container_width=True,
             ):
+                analyzer = _ensure_analyzer(resources, "analyze_document")
                 with st.spinner("Analyzing document fields with AI…"):
-                    st.session_state[analysis_key] = _analyze_document(
-                        resources, document, list(category_by_name)
+                    st.session_state[analysis_key] = analyzer.analyze_document(
+                        document, list(category_by_name)
                     )
                 st.rerun()
 
@@ -457,9 +458,10 @@ def render_claim_form(resources: AppResources, user_id: int) -> None:
                 description=description.strip(),
                 expense_date=expense_date.isoformat(),
             )
+            analyzer = _ensure_analyzer(resources, "suggest_payment_details")
             with st.spinner("Creating a safe payment reference…"):
-                st.session_state[suggestion_key] = _suggest_payment_details(
-                    resources, suggestion_payload
+                st.session_state[suggestion_key] = analyzer.suggest_payment_details(
+                    suggestion_payload
                 )
             st.session_state[suggestion_revision_key] = suggestion_revision + 1
             st.rerun()
@@ -806,32 +808,15 @@ def _is_user_safe_error(exc: Exception) -> bool:
     )
 
 
-def _suggest_payment_details(
-    resources: AppResources, payload: dict[str, str]
-) -> PaymentSuggestionResult:
+def _ensure_analyzer(resources: AppResources, method_name: str) -> ExpenseAnalyzer:
     """Recover gracefully if Streamlit retained an analyzer from an older deployment."""
-    if not hasattr(resources.analyzer, "suggest_payment_details"):
+    if not hasattr(resources.analyzer, method_name):
         resources.analyzer = ExpenseAnalyzer(
             resources.settings.openai_api_key,
             resources.settings.openai_model,
             resources.settings.ai_timeout_seconds,
         )
-    return resources.analyzer.suggest_payment_details(payload)
-
-
-def _analyze_document(
-    resources: AppResources,
-    document: ProcessedDocument,
-    routing_categories: list[str],
-) -> DocumentAnalysisResult:
-    """Run dynamic extraction and recover from a stale cached analyzer after deployment."""
-    if not hasattr(resources.analyzer, "analyze_document"):
-        resources.analyzer = ExpenseAnalyzer(
-            resources.settings.openai_api_key,
-            resources.settings.openai_model,
-            resources.settings.ai_timeout_seconds,
-        )
-    return resources.analyzer.analyze_document(document, routing_categories)
+    return resources.analyzer
 
 
 if __name__ == "__main__":
