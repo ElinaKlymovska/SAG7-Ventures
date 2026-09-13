@@ -4,6 +4,8 @@ from datetime import date
 from decimal import Decimal
 from types import SimpleNamespace
 
+import pytest
+
 from expense_approval.ai import (
     DocumentAnalysisResult,
     ExpenseAnalyzer,
@@ -401,3 +403,64 @@ def test_openai_result_upgrades_a_cached_fallback(
     assert upgraded.source == AssessmentSource.OPENAI
     assert upgraded.summary == "OpenAI summary"
     assert upgraded.model == "gpt-5-mini"
+
+
+def _document_analysis_with_total(
+    monkeypatch: object, original_total: str, routing_categories: list[str]
+) -> DocumentAnalysisResult:
+    """Run analyze_document against a model reply carrying the given total."""
+
+    class FakeResponses:
+        def parse(self, **_kwargs: object) -> SimpleNamespace:
+            return SimpleNamespace(
+                output_parsed=StructuredDocumentExtraction(
+                    document_kind="invoice",
+                    is_expense_evidence=True,
+                    vendor="Acme LLC",
+                    document_number="00000047",
+                    original_total=original_total,
+                    currency="USD",
+                    expense_date="2022-08-01",
+                    suggested_category="Office",
+                    routing_category="Office",
+                    description="Office supplies invoice",
+                    confidence_percent=90,
+                    warnings=[],
+                )
+            )
+
+    class FakeOpenAI:
+        def __init__(self, **_kwargs: object):
+            self.responses = FakeResponses()
+
+    monkeypatch.setattr("expense_approval.ai.OpenAI", FakeOpenAI)
+    return ExpenseAnalyzer("test-key", "gpt-5-mini").analyze_document(
+        _unknown_image_document(), routing_categories
+    )
+
+
+@pytest.mark.parametrize(
+    "original_total",
+    ["1,234.56", "1.234,56", "1 234,56"],
+)
+def test_model_totals_keep_their_thousands_separator(
+    monkeypatch: object, original_total: str
+) -> None:
+    """A thousands separator must not be read as a decimal point."""
+    result = _document_analysis_with_total(monkeypatch, original_total, ["Office", "Other"])
+
+    assert result.extraction.amount == Decimal("1234.56")
+
+
+def test_model_total_without_decimals_is_not_divided(monkeypatch: object) -> None:
+    result = _document_analysis_with_total(monkeypatch, "1,234", ["Office", "Other"])
+
+    assert result.extraction.amount == Decimal("1234.00")
+
+
+def test_document_analysis_survives_empty_routing_categories(monkeypatch: object) -> None:
+    """An unseeded database must not crash the extraction merge."""
+    result = _document_analysis_with_total(monkeypatch, "25.00", [])
+
+    assert result.extraction.routing_category is None
+    assert result.extraction.amount == Decimal("25.00")

@@ -6,7 +6,6 @@ import json
 import logging
 from dataclasses import dataclass, replace
 from datetime import date
-from decimal import Decimal, InvalidOperation
 from time import perf_counter
 from typing import Any, Literal
 
@@ -17,6 +16,7 @@ from expense_approval.documents import (
     DocumentExtraction,
     DocumentKind,
     ProcessedDocument,
+    parse_money,
     sanitize_document_text_for_ai,
 )
 from expense_approval.models import AssessmentSource, ExpenseClaim
@@ -407,13 +407,13 @@ def _merge_document_extraction(
         if parsed.document_kind != "other"
         else DocumentKind.OTHER
     )
-    amount = _parse_positive_decimal(parsed.original_total) or local.amount
+    amount = parse_money(parsed.original_total or "") or local.amount
     currency = (parsed.currency or local.currency or "").strip().upper() or None
     extracted_date = _parse_iso_date(parsed.expense_date) or local.expense_date
     route_lookup = {category.casefold(): category for category in routing_categories}
     routing_category = route_lookup.get(parsed.routing_category.strip().casefold())
     if routing_category is None:
-        routing_category = route_lookup.get("other") or routing_categories[0]
+        routing_category = route_lookup.get("other") or next(iter(routing_categories), None)
     vendor = _clean_optional(parsed.vendor) or local.vendor
     document_number = _clean_optional(parsed.document_number) or local.document_number
     warnings = tuple(warning.strip() for warning in parsed.warnings if warning.strip())
@@ -451,17 +451,6 @@ def _document_analysis_fallback(
         latency_ms=0,
         error_message=error_message,
     )
-
-
-def _parse_positive_decimal(value: str | None) -> Decimal | None:
-    if not value:
-        return None
-    normalized = value.strip().replace(" ", "").replace(",", ".")
-    try:
-        amount = Decimal(normalized).quantize(Decimal("0.01"))
-    except InvalidOperation:
-        return None
-    return amount if amount > 0 else None
 
 
 def _parse_iso_date(value: str | None) -> date | None:

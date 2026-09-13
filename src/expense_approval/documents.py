@@ -466,7 +466,7 @@ def _extract_payable_amount(text: str) -> Decimal | None:
                 continue
             value_text = " ".join((line[match.end() :], *lines[index + 1 : index + 3]))
             for raw_value in MONEY_PATTERN.findall(value_text):
-                parsed = _parse_money(raw_value)
+                parsed = parse_money(raw_value)
                 if parsed is not None:
                     values.append(parsed)
         if values:
@@ -474,12 +474,23 @@ def _extract_payable_amount(text: str) -> Decimal | None:
     return None
 
 
-def _parse_money(value: str) -> Decimal | None:
+def parse_money(value: str) -> Decimal | None:
+    """Parse a positive money amount written in any of the separator styles we meet.
+
+    Handles ``1,234.56``, ``1.234,56``, ``1 234,56`` and ``1234.56``. A lone separator
+    followed by exactly three digits groups thousands (``1,234`` is 1234.00), while two
+    or four digits are a fraction (``1,23`` is 1.23). Returns ``None`` when the text is
+    not a positive number.
+    """
     compact = value.replace(" ", "").replace("\u00a0", "")
     if "," in compact and "." in compact:
         decimal_separator = "," if compact.rfind(",") > compact.rfind(".") else "."
         thousands_separator = "." if decimal_separator == "," else ","
         compact = compact.replace(thousands_separator, "").replace(decimal_separator, ".")
+    elif (separator := "," if "," in compact else "." if "." in compact else "") and re.fullmatch(
+        rf"\d{{1,3}}(?:{re.escape(separator)}\d{{3}})+", compact
+    ):
+        compact = compact.replace(separator, "")
     elif "," in compact:
         compact = compact.replace(",", ".")
     try:
