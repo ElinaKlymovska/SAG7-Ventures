@@ -377,16 +377,42 @@ def _extract_vendor(text: str, searchable: str) -> str | None:
         if marker in searchable:
             return display_name
 
-    pattern = re.compile(
-        r"(?:Постачальник|Одержувач|Raz[oó]n Social|Proveedor|Vendor)"
-        r"[ \t]*:?[ \t]*([^\n]{3,160})",
-        re.IGNORECASE,
+    labels = (
+        r"Постачальник|Одержувач|Raz[oó]n Social|Proveedor|Vendor|"
+        r"Biller|Seller|Supplier|Merchant"
     )
-    match = pattern.search(text)
-    if not match:
-        return None
-    candidate = re.sub(r"\s+", " ", match.group(1)).strip(" :-")
-    return candidate[:120] or None
+    patterns = (
+        # A labelled value on the same line. Horizontal whitespace is deliberate:
+        # a blank field must not consume the next labelled line as its value.
+        rf"(?im)^[ \t]*(?:{labels})[ \t]*:?[ \t]+([^\n]{{3,160}})$",
+        # Many invoice templates render the value in a separate row beneath the label.
+        rf"(?im)^[ \t]*(?:{labels})[ \t]*:?[ \t]*(?:\n[ \t]*)+"
+        rf"([^\n]{{3,160}})$",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if not match:
+            continue
+        candidate = re.sub(r"\s+", " ", match.group(1)).strip(" :-")
+        if _looks_like_field_label(candidate):
+            continue
+        return candidate[:120] or None
+    return None
+
+
+def _looks_like_field_label(value: str) -> bool:
+    normalized = value.casefold().strip()
+    return value.rstrip().endswith(":") or normalized.startswith(
+        (
+            "address",
+            "invoice ",
+            "fecha ",
+            "domicilio ",
+            "cuit",
+            "tax id",
+            "total",
+        )
+    )
 
 
 def _extract_document_number(text: str) -> str | None:
@@ -395,6 +421,8 @@ def _extract_document_number(text: str) -> str | None:
         r"АКТ-РАХУНОК[^\n]{0,100}?№\s*([\w./-]+)",
         r"Comp\.?\s*Nro\.?\s*:?\s*([\w./-]+)",
         r"(?:Factura|Comprobante)\s*(?:Nro\.?|No\.?|#)\s*:?\s*([\w./-]+)",
+        r"(?:Invoice|Document)\s*(?:No\.?|Number|#)\s*:?"
+        r"[ \t]*(?:\n[ \t]*)*([A-Za-z0-9][\w./-]*)",
     )
     for pattern in patterns:
         match = re.search(pattern, text, re.IGNORECASE)
@@ -404,7 +432,8 @@ def _extract_document_number(text: str) -> str | None:
 
 
 MONEY_PATTERN = re.compile(
-    r"(?<!\d)(\d{1,3}(?:[ \u00a0]\d{3})+(?:[.,]\d{2,4})|\d{1,9}[.,]\d{2,4})(?!\d)"
+    r"(?<!\d)(\d{1,3}(?:[ \u00a0,.]\d{3})+(?:[.,]\d{2,4})?"
+    r"|\d{1,9}[.,]\d{2,4})(?!\d)"
 )
 
 
@@ -423,7 +452,11 @@ def _extract_payable_amount(text: str) -> Decimal | None:
         r"importe neto gravado",
         r"разом",
     )
-    lines = [re.sub(r"\s+", " ", line).strip() for line in text.splitlines()]
+    lines = [
+        normalized_line
+        for line in text.splitlines()
+        if (normalized_line := re.sub(r"\s+", " ", line).strip())
+    ]
     for label in labels:
         values: list[Decimal] = []
         pattern = re.compile(label, re.IGNORECASE)
@@ -485,6 +518,33 @@ UKRAINIAN_MONTHS = {
     "грудня": 12,
 }
 
+ENGLISH_MONTHS = {
+    "jan": 1,
+    "january": 1,
+    "feb": 2,
+    "february": 2,
+    "mar": 3,
+    "march": 3,
+    "apr": 4,
+    "april": 4,
+    "may": 5,
+    "jun": 6,
+    "june": 6,
+    "jul": 7,
+    "july": 7,
+    "aug": 8,
+    "august": 8,
+    "sep": 9,
+    "sept": 9,
+    "september": 9,
+    "oct": 10,
+    "october": 10,
+    "nov": 11,
+    "november": 11,
+    "dec": 12,
+    "december": 12,
+}
+
 
 def _extract_expense_date(text: str) -> date | None:
     month_names = "|".join(UKRAINIAN_MONTHS)
@@ -515,6 +575,23 @@ def _extract_expense_date(text: str) -> date | None:
             parsed = _parse_date(match.group(1))
             if parsed:
                 return parsed
+
+    english_month_names = "|".join(ENGLISH_MONTHS)
+    english_invoice_date = re.search(
+        rf"(?:Invoice\s+date|Date)[ \t]*:?[ \t]*(?:\n[ \t]*)*"
+        rf"(\d{{1,2}})[ \t]+({english_month_names})[ \t,]+(\d{{4}})",
+        text,
+        re.IGNORECASE,
+    )
+    if english_invoice_date:
+        try:
+            return date(
+                int(english_invoice_date.group(3)),
+                ENGLISH_MONTHS[english_invoice_date.group(2).casefold()],
+                int(english_invoice_date.group(1)),
+            )
+        except ValueError:
+            pass
 
     match = re.search(rf"(\d{{1,2}})\s+({month_names})\s+(\d{{4}})", text, re.IGNORECASE)
     if match:

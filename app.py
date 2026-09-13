@@ -47,7 +47,7 @@ st.set_page_config(
 )
 
 RESOURCE_CACHE_VERSION = "dynamic-document-analysis-v1"
-DOCUMENT_PROCESSOR_VERSION = "multilingual-ocr-v1"
+DOCUMENT_PROCESSOR_VERSION = "multiline-invoice-fields-v2"
 
 
 @dataclass
@@ -316,6 +316,21 @@ def render_claim_form(resources: AppResources, user_id: int) -> None:
             if analysis_result is not None:
                 document = replace(document, extraction=analysis_result.extraction)
             _render_document_extraction(document, analysis_result)
+
+            extraction = document.extraction
+            if analysis_result is None and any(
+                value is None
+                for value in (
+                    extraction.vendor,
+                    extraction.document_number,
+                    extraction.amount,
+                    extraction.expense_date,
+                )
+            ):
+                st.info(
+                    "Local OCR extracted only part of this document. To improve the "
+                    "missing fields, tick the consent box and run AI analysis below."
+                )
 
             consent = st.checkbox(
                 "I agree to send this document to OpenAI for AI field extraction.",

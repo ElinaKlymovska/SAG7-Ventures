@@ -103,6 +103,35 @@ def test_unknown_spanish_invoice_fields_are_extracted_without_vendor_allowlist()
     assert extraction.category_hint == "Other"
 
 
+def test_multiline_english_invoice_fields_and_grouped_usd_total_are_extracted() -> None:
+    extraction = analyze_document_text(
+        """
+        Invoice
+        Biller:
+        Nazwa Spotki LLC
+        Invoice No.:
+        1
+        Invoice date:
+        23 Feb 2013
+        Total
+        =
+        $1,000.00
+        Invoice Amount $1,000.00
+        """,
+        "faktura-invoice-usa1.png",
+        "local OCR",
+    )
+
+    assert extraction.kind == DocumentKind.INVOICE
+    assert extraction.is_expense_evidence is True
+    assert extraction.vendor == "Nazwa Spotki LLC"
+    assert extraction.document_number == "1"
+    assert extraction.amount == Decimal("1000.00")
+    assert extraction.currency == "USD"
+    assert extraction.expense_date == date(2013, 2, 23)
+    assert extraction.category_hint == "Other"
+
+
 def test_document_text_is_sanitized_before_text_only_ai_analysis() -> None:
     sanitized = sanitize_document_text_for_ai(
         "Vendor: Example LLC\nIBAN: XX001234567890123456\n"
