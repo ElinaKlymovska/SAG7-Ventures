@@ -79,7 +79,8 @@ password because every account and claim is fictional and the deployment is a pu
    the non-sensitive reimbursement reference, and edit it if needed.
 4. Submit the expense, then open a second private browser window.
 5. Sign in there as `approver@expense-demo.local`; the claim appears within two seconds. Its
-   supporting file is available only inside the authorized claim view.
+   extracted document fields, file name, and checksum are visible only inside the authorized
+   claim view; the original file itself was never stored.
 6. Open the seeded `$780.00` Office claim describing a London flight. The AI or labeled fallback
    flags the category mismatch while both decision buttons remain active.
 7. Try Reject without a comment, then reject with a reason. The employee view updates within two
@@ -189,10 +190,10 @@ pytest --cov=expense_approval
 ```
 
 The suite covers validation, routing, dual roles, access isolation, all transitions, mandatory
-rejection comments, concurrent decisions, document classification and extraction, attachment
-integrity, the OCR contract with Tesseract and Poppler, AI payload privacy, money parsing across
-separator styles, structured response parsing, fallback behavior,
-caching, sanitized OCR, dynamic AI document fields and category routing, editable payment-detail
+rejection comments, concurrent decisions, document classification and extraction, upload
+signature and size validation, the OCR contract with Tesseract and Poppler, AI payload privacy,
+money parsing across separator styles, structured response parsing, fallback behavior, caching,
+sanitized OCR, dynamic AI document fields and category routing, editable payment-detail
 suggestions, and Streamlit workflow smoke tests.
 
 ## Deploy to Streamlit Community Cloud
@@ -220,9 +221,10 @@ Never commit `.streamlit/secrets.toml` or an API key.
 - SQLite is appropriate for this reviewable demo, not for a production financial system. The
   local database may reset when a Community Cloud instance is rebuilt.
 - "Live" status uses a two-second Streamlit fragment refresh, not database push subscriptions.
-- Attachments are stored as SQLite BLOBs and share the demo database's ephemeral lifecycle. A
-  production version should use private object storage, malware scanning, retention policies,
-  and an audit trail.
+- Uploaded files are discarded once their fields are extracted; only the extracted values, the
+  file name, and a checksum are kept, so a submitted claim cannot be re-verified against its
+  original document. A production version that needs the originals should add private object
+  storage, malware scanning, retention policies, and an audit trail.
 - Payment details are synthetic free text and are visible only to the claimant and assigned
   approver. The UI warns users not to enter real financial data.
 - Registration, editing submitted claims, notifications, currency conversion, SSO, audit
