@@ -51,9 +51,11 @@ RESOURCE_CACHE_VERSION = "ai-image-optin-v1"
 DOCUMENT_PROCESSOR_VERSION = "multiline-invoice-fields-v2"
 DOCUMENT_JOBS_KEY = "_document_jobs"
 DOCUMENT_RESULTS_KEY = "_document_results"
-# One 8 MB document per entry, so this cap is what keeps a session from growing
-# without bound as the employee tries one file after another.
-MAX_CACHED_DOCUMENTS = 8
+# Each entry pins a whole ProcessedDocument, whose `content` still holds the full
+# upload (up to 8 MB) because _validate_document re-checks its hash at submission.
+# Three keeps the realistic "try a few files" flow cached while bounding a session
+# at ~24 MB rather than ~64 MB.
+MAX_CACHED_DOCUMENTS = 3
 
 
 @dataclass
@@ -66,7 +68,13 @@ class AppResources:
     document_executor: ThreadPoolExecutor
 
 
-@st.cache_resource
+def _shutdown_resources(resources: AppResources) -> None:
+    """Release worker threads when Streamlit discards a cached AppResources."""
+    resources.executor.shutdown(wait=False)
+    resources.document_executor.shutdown(wait=False)
+
+
+@st.cache_resource(on_release=_shutdown_resources)
 def get_resources(settings: Settings, cache_version: str) -> AppResources:
     del cache_version  # Changing this value safely invalidates resources after API changes.
     database = Database(settings.database_url)
@@ -177,6 +185,12 @@ def _document_job_state(
         results[key] = DocumentJobState(job.result(), None, False)
     except Exception as exc:
         if not _is_user_safe_error(exc):
+            # Record the failure before re-raising. The job was just removed above,
+            # so without this the next script run would resubmit the same failing
+            # work and raise again on every interaction.
+            results[key] = DocumentJobState(
+                None, "The document could not be read.", False
+            )
             raise
         results[key] = DocumentJobState(None, str(exc), False)
     while len(results) > MAX_CACHED_DOCUMENTS:
@@ -187,11 +201,16 @@ def _document_job_state(
 @st.fragment(run_every="1s")
 def _render_document_progress(digest: str) -> None:
     """Poll the background reader and refresh the page once it finishes."""
-    job = st.session_state.get(DOCUMENT_JOBS_KEY, {}).get(
-        f"{DOCUMENT_PROCESSOR_VERSION}:{digest}"
-    )
-    if job is None or job.done():
+    key = f"{DOCUMENT_PROCESSOR_VERSION}:{digest}"
+    job = st.session_state.get(DOCUMENT_JOBS_KEY, {}).get(key)
+    # A finished job is collected by _document_job_state, which removes it from the
+    # jobs dict; a full rerun then picks the result up. A missing key means it was
+    # already collected, so rerunning again would spin the whole app once per second.
+    if job is not None and job.done():
         st.rerun(scope="app")
+    if job is None:
+        st.caption("Finishing up…")
+        return
     st.info("Reading the document locally… Submitting unlocks when it finishes.")
     st.caption("Scanned files run OCR, which can take up to a minute.")
 
@@ -361,7 +380,7 @@ def render_claim_form(resources: AppResources, user_id: int) -> None:
         document_pending = False
         # Hashing the upload is instant, so the form keys below never wait for OCR.
         document_token = (
-            hashlib.sha256(uploaded_file.getvalue()).hexdigest()[:10]
+            hashlib.sha256(uploaded_file.getvalue()).hexdigest()
             if uploaded_file is not None
             else "manual"
         )
@@ -412,6 +431,9 @@ def render_claim_form(resources: AppResources, user_id: int) -> None:
                 help=(
                     "Images are sent to OpenAI; PDFs use locally extracted text with common "
                     "banking and personal identifiers removed."
+                    if resources.settings.ai_send_document_images
+                    else "Only locally extracted text is sent, with common banking and "
+                    "personal identifiers removed. The file itself never leaves this app."
                 ),
             )
             if st.button(

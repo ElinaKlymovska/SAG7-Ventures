@@ -24,6 +24,17 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    # The original bytes are gone for good; the column returns empty and nullable.
+    # 0002 declared `content` NOT NULL, and the bytes it held are gone for good. A
+    # nullable column would leave rows that the rolled-back code cannot read: it
+    # hashes document.content on every submission. Restore the NOT NULL shape by
+    # backfilling empty bytes, so the schema matches 0002 even though the original
+    # attachments cannot come back.
     with op.batch_alter_table("expense_documents") as batch:
-        batch.add_column(sa.Column("content", sa.LargeBinary(), nullable=True))
+        batch.add_column(
+            sa.Column(
+                "content",
+                sa.LargeBinary(),
+                nullable=False,
+                server_default=sa.text("x''"),
+            )
+        )

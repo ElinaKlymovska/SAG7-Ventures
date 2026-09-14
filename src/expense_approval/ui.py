@@ -196,8 +196,16 @@ def render_claim_details(claim: ExpenseClaim, *, show_employee: bool = False) ->
                 warnings = []
             for warning in warnings:
                 st.warning(str(warning))
+            # Only claim the file stayed local when it actually did: the vision path
+            # sends the image itself, so the note must follow processing_method.
+            raw_file_sent = "vision" in (document.processing_method or "").casefold()
             st.caption(
-                f"Processed with {document.processing_method}. The raw file was not sent to OpenAI."
+                f"Processed with {document.processing_method}."
+                + (
+                    " The image itself was sent to OpenAI for this extraction."
+                    if raw_file_sent
+                    else " The raw file was not sent to OpenAI."
+                )
             )
             st.caption(
                 "The original file is never stored. Only the fields extracted above, "

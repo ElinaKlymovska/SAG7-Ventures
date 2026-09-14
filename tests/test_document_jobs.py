@@ -66,15 +66,30 @@ def test_slow_document_reports_pending_instead_of_blocking(
     session: dict, resources: SimpleNamespace, monkeypatch: object
 ) -> None:
     release = Event()
-    monkeypatch.setattr(
-        app, "process_document", lambda *_args: release.wait(5) or "parsed"
-    )
+    started = Event()
 
-    state = _read(resources)
+    def blocking_process(*_args: object) -> str:
+        started.set()
+        release.wait(5)
+        return "parsed"
 
-    assert state.pending is True
-    assert state.document is None and state.error is None
-    release.set()
+    monkeypatch.setattr(app, "process_document", blocking_process)
+
+    try:
+        state = _read(resources)
+        # Without this barrier the assertions below would pass even if the worker
+        # had never been scheduled, so the test would not prove non-blocking reads.
+        assert started.wait(5) is True
+        assert state.pending is True
+        assert state.document is None and state.error is None
+    finally:
+        # Always release, so a failed assertion cannot make executor teardown
+        # block for the full five seconds.
+        release.set()
+
+    while (state := _read(resources)).pending:
+        pass
+    assert state.document == "parsed"
 
 
 def test_finished_document_is_returned_and_cached(
@@ -133,12 +148,13 @@ def test_cached_documents_are_capped(
 ) -> None:
     monkeypatch.setattr(app, "process_document", lambda *_args: "parsed")
 
-    for index in range(app.MAX_CACHED_DOCUMENTS + 3):
+    last_index = app.MAX_CACHED_DOCUMENTS + 2
+    for index in range(last_index + 1):
         while _read(resources, digest=f"digest-{index}").pending:
             pass
 
     results = session[app.DOCUMENT_RESULTS_KEY]
     assert len(results) == app.MAX_CACHED_DOCUMENTS
-    # The oldest entries are the ones dropped.
+    # The oldest entries are the ones dropped, the newest is always kept.
     assert f"{app.DOCUMENT_PROCESSOR_VERSION}:digest-0" not in results
-    assert f"{app.DOCUMENT_PROCESSOR_VERSION}:digest-10" in results
+    assert f"{app.DOCUMENT_PROCESSOR_VERSION}:digest-{last_index}" in results

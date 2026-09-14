@@ -159,14 +159,18 @@ class ExpenseAnalyzer:
     def openai_enabled(self) -> bool:
         return self._client is not None
 
+    def _unavailable_reason(self) -> str:
+        """Why this analyzer has no client, for the fallback's error_message."""
+        if self._client_error is not None:
+            return f"OpenAI client is unavailable ({self._client_error})."
+        return "OPENAI_API_KEY is not configured."
+
     def analyze(self, payload: dict[str, str]) -> AssessmentResult:
-        if not self.api_key:
-            return rule_based_assessment(payload, "OPENAI_API_KEY is not configured.")
+        if self._client is None:
+            return rule_based_assessment(payload, self._unavailable_reason())
 
         started = perf_counter()
         try:
-            if self._client is None:
-                raise RuntimeError("OpenAI client is unavailable.")
             response = self._client.responses.parse(
                 model=self.model,
                 instructions=AI_INSTRUCTIONS,
@@ -211,15 +215,11 @@ class ExpenseAnalyzer:
     def suggest_payment_details(
         self, payload: dict[str, str]
     ) -> PaymentSuggestionResult:
-        if not self.api_key:
-            return rule_based_payment_details(
-                payload, "OPENAI_API_KEY is not configured."
-            )
+        if self._client is None:
+            return rule_based_payment_details(payload, self._unavailable_reason())
 
         started = perf_counter()
         try:
-            if self._client is None:
-                raise RuntimeError("OpenAI client is unavailable.")
             response = self._client.responses.parse(
                 model=self.model,
                 instructions=PAYMENT_DETAILS_INSTRUCTIONS,
@@ -258,15 +258,11 @@ class ExpenseAnalyzer:
     def analyze_document(
         self, document: ProcessedDocument, routing_categories: list[str]
     ) -> DocumentAnalysisResult:
-        if not self.api_key:
-            return _document_analysis_fallback(
-                document, "OPENAI_API_KEY is not configured."
-            )
+        if self._client is None:
+            return _document_analysis_fallback(document, self._unavailable_reason())
 
         started = perf_counter()
         try:
-            if self._client is None:
-                raise RuntimeError("OpenAI client is unavailable.")
             sanitized_text = sanitize_document_text_for_ai(
                 getattr(document, "extracted_text", "")
             )
@@ -446,7 +442,11 @@ def _merge_document_extraction(
         # Keep a rejected file described by the local classifier alone, so an injected
         # "Invoice, 93% confidence" cannot dress up a file the gate will refuse anyway.
         kind = local.kind
-        warnings += tuple(w for w in local.warnings if w not in warnings)
+        # Local reasons come first: the [:5] cap below must never let model-supplied
+        # padding warnings crowd out why this file was actually refused.
+        warnings = tuple(local.warnings) + tuple(
+            w for w in warnings if w not in local.warnings
+        )
     return DocumentExtraction(
         kind=kind,
         is_expense_evidence=is_expense_evidence,

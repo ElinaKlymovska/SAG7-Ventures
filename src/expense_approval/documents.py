@@ -431,6 +431,12 @@ def _extract_document_number(text: str) -> str | None:
     return None
 
 
+# A lone separator followed by runs of exactly three digits is thousands grouping
+# ("1,234" and "1.234" are both 1234), not a fraction. Precompiled because
+# parse_money runs once per money-like match per label per line.
+COMMA_GROUPED_PATTERN = re.compile(r"\d{1,3}(?:,\d{3})+")
+DOT_GROUPED_PATTERN = re.compile(r"\d{1,3}(?:\.\d{3})+")
+
 MONEY_PATTERN = re.compile(
     r"(?<!\d)(\d{1,3}(?:[ \u00a0,.]\d{3})+(?:[.,]\d{2,4})?"
     r"|\d{1,9}[.,]\d{2,4})(?!\d)"
@@ -487,10 +493,10 @@ def parse_money(value: str) -> Decimal | None:
         decimal_separator = "," if compact.rfind(",") > compact.rfind(".") else "."
         thousands_separator = "." if decimal_separator == "," else ","
         compact = compact.replace(thousands_separator, "").replace(decimal_separator, ".")
-    elif (separator := "," if "," in compact else "." if "." in compact else "") and re.fullmatch(
-        rf"\d{{1,3}}(?:{re.escape(separator)}\d{{3}})+", compact
-    ):
-        compact = compact.replace(separator, "")
+    elif COMMA_GROUPED_PATTERN.fullmatch(compact):
+        compact = compact.replace(",", "")
+    elif DOT_GROUPED_PATTERN.fullmatch(compact):
+        compact = compact.replace(".", "")
     elif "," in compact:
         compact = compact.replace(",", ".")
     try:

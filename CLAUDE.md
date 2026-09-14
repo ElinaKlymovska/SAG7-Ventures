@@ -69,6 +69,12 @@ New migration: `alembic revision --autogenerate -m "..."` from the repo root
 - **Assessment cache** is keyed by `(claim_id, sha256(payload))` via `payload_hash`, enforced by
   the `uq_assessment_claim_input` constraint. `save_assessment` upgrades an existing fallback row
   to an OpenAI result, but never the reverse.
+- **Money separators.** `parse_money` in
+  [documents.py](src/expense_approval/documents.py) is shared by the OCR extractor and the AI
+  merge. A lone separator followed by runs of exactly three digits is thousands grouping
+  (`1,234` and `1.234` are both 1234.00); two or four digits are a fraction. This is ambiguous
+  by nature — `1.500` reads as 1500, not 1.50 — and deliberate, so both separator conventions
+  behave the same. Changing it moves every OCR amount.
 - **Background jobs.** `render_ai_assessment` stores a `Future` in
   `st.session_state["_ai_jobs"]` under `claim_id:hash:model` so the 2-second fragments do not
   re-submit a request on every rerender. Demo reset and sign-out clear that key.
