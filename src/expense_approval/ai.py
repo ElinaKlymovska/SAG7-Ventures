@@ -473,9 +473,27 @@ def _merge_document_extraction(
 def _document_analysis_fallback(
     document: ProcessedDocument, error_message: str
 ) -> DocumentAnalysisResult:
-    warning = "AI extraction was unavailable; the displayed fields come from local OCR rules."
+    """Classify locally, but never prefill a field the model did not read.
+
+    The local rules recognise the layouts they were written against and quietly
+    mispick on the ones they were not: an Uber receipt listing "Trip fare 40.94"
+    above "Total 28.66" yields the larger number with no warning attached. An
+    amount that looks extracted but is wrong is worse than an empty field, so
+    when the model is unavailable the fields are cleared and the employee is
+    told to fill them in. `kind` and `is_expense_evidence` stay local — that
+    gate is deliberately never the model's to open.
+    """
+    warning = (
+        "AI extraction was unavailable, so no fields were filled in. "
+        "Enter them manually from the document."
+    )
     extraction = replace(
         document.extraction,
+        vendor=None,
+        document_number=None,
+        amount=None,
+        currency=None,
+        expense_date=None,
         warnings=tuple(dict.fromkeys((*document.extraction.warnings, warning))),
     )
     return DocumentAnalysisResult(

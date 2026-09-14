@@ -63,6 +63,13 @@ New migration: `alembic revision --autogenerate -m "..."` from the repo root
   document text reaches the model as input, so this is what stops a prompt injection inside a
   file from clearing the `_validate_document` gate in `services.py`. Never take
   `parsed.is_expense_evidence` directly.
+- **Extraction is the model's job, and a failure clears the fields.** The local rules read the
+  layouts they were written for and mispick silently on the rest — a real Uber receipt yields
+  `Trip fare 40.94` instead of the discounted `Total 28.66`. So `_document_job_state` runs
+  `analyze_document` on every admissible upload with no consent step, and
+  `_document_analysis_fallback` blanks `vendor`/`amount`/`currency`/`expense_date` when the model
+  is unavailable: a wrong amount that looks extracted is worse than an empty field. `kind` and
+  `is_expense_evidence` stay local — see the downgrade-only rule above.
 - **The AI is advisory only.** Neither the OpenAI path nor `rule_based_assessment` mutates claim
   status, and both decision buttons stay enabled. `ExpenseAnalyzer.analyze` never raises: any
   failure becomes a fallback result with `source=AssessmentSource.FALLBACK`.
@@ -87,8 +94,10 @@ New migration: `alembic revision --autogenerate -m "..."` from the repo root
 `st.secrets` first, then environment variables: `DATABASE_URL`, `OPENAI_API_KEY`, `OPENAI_MODEL`
 (default `gpt-5-mini`), `AI_TIMEOUT_SECONDS`, `AI_SEND_DOCUMENT_IMAGES` (default `false`).
 
-Without `OPENAI_API_KEY` the app is fully functional and labels the AI panel as a rule-based
-fallback — keep the key optional. `.streamlit/secrets.toml` is gitignored; the template is
+Without `OPENAI_API_KEY` the claim workflow still works and the approver's AI panel labels
+itself a rule-based fallback — keep that path working. Document extraction is the exception: the
+model owns it, so without a key `_document_analysis_fallback` clears the fields instead of
+showing regex guesses. `.streamlit/secrets.toml` is gitignored; the template is
 `.streamlit/secrets.example.toml`.
 
 ## Related docs

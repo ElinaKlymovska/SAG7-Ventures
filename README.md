@@ -19,7 +19,7 @@ configured, the app immediately remains usable and labels its deterministic fall
 - Mandatory rejection comments and owner-only withdrawal.
 - Object-level access checks in the service layer, not just UI filtering.
 - PDF, JPG, PNG, and WebP intake with embedded-text extraction and local OCR.
-- Multilingual local OCR plus consent-based AI extraction for unfamiliar document layouts.
+- Multilingual local OCR followed by AI extraction, so any language or layout is read.
 - Dynamic vendor, document number, total, currency, date, and business-category suggestions.
 - Two-second live refresh for employee status and approver queues.
 - OpenAI Responses API integration with structured output.
@@ -40,9 +40,12 @@ streamlit run app.py
 
 The final command, `streamlit run app.py`, is the single command used to launch the app. It
 creates `data/expense_approval.sqlite3`, applies the Alembic migrations, and loads the demo
-dataset automatically. No API key is required; without one, the AI panel is explicitly labeled
-as a rule-based fallback. Image and scanned-PDF OCR additionally requires Poppler and Tesseract;
-Community Cloud installs them from `packages.txt`.
+dataset automatically. The claim workflow runs without an API key, and the approver's AI panel
+is then explicitly labeled as a rule-based fallback. Document extraction is the exception: it is
+the model's job, so without a key the uploaded document is still classified and accepted, but no
+fields are filled in and the employee types them from the document. Set `OPENAI_API_KEY` to see
+extraction work. Image and scanned-PDF OCR additionally requires Poppler and Tesseract; Community
+Cloud installs them from `packages.txt`.
 
 To enable OpenAI analysis:
 
@@ -72,11 +75,11 @@ password because every account and claim is fictional and the deployment is a pu
 
 1. Sign in as `employee@expense-demo.local`. Open **My claims** and verify all four statuses.
 2. Confirm that the second employee's printer-toner claim is not visible.
-3. Open **New expense** and upload an invoice. Verify the suggested vendor, original total,
-   category, date, and description. For a non-USD invoice, enter the converted USD amount
-   manually; the MVP never invents an exchange rate. For an unfamiliar layout, consent and click
-   **Analyze or improve fields with AI**. Then click **Suggest payment details with AI**, review
-   the non-sensitive reimbursement reference, and edit it if needed.
+3. Open **New expense** and upload an invoice. Extraction runs on upload: verify the suggested
+   vendor, original total, category, date, and description. For a non-USD invoice, enter the
+   converted USD amount manually; the MVP never invents an exchange rate. Then click
+   **Suggest payment details with AI**, review the non-sensitive reimbursement reference, and
+   edit it if needed.
 4. Submit the expense, then open a second private browser window.
 5. Sign in there as `approver@expense-demo.local`; the claim appears within two seconds. Its
    extracted document fields, file name, and checksum are visible only inside the authorized
@@ -98,7 +101,7 @@ are normalized, enlarged, contrast-adjusted, and sharpened before OCR.
 
 ```text
 upload → signature/size validation → local text extraction/OCR → evidence classification
-       → optional consent-based AI extraction → dynamic fields + configured routing category
+       → AI field extraction → dynamic fields + configured routing category
        → employee review → submit
 ```
 
@@ -113,9 +116,9 @@ conversion is outside the MVP.
 
 The raw attachment is never stored. Once the fields are extracted, the file is discarded and the
 claim keeps only the extracted values, the original filename, and a checksum, which the employee
-and the assigned approver see on the claim. Local extraction never calls an external service. Optional AI extraction is
-explicitly consent-based and sends locally extracted text after common banking identifiers, long
-IDs, addresses, and emails are removed. Document images are withheld by default, because an image
+and the assigned approver see on the claim. The local pass never calls an external service; its text is then sent to
+OpenAI for field extraction after common banking identifiers, long IDs, addresses, and emails
+are removed. The upload control states this before a file is chosen. Document images are withheld by default, because an image
 cannot be sanitized the way text can; setting `AI_SEND_DOCUMENT_IMAGES = true` opts into sending
 images to OpenAI vision. Payment details and user identity are never included. Whether a file
 counts as expense evidence is decided locally: the model can withdraw that status but never grant
@@ -129,7 +132,7 @@ payment information; automated tests use synthetic equivalents.
 flowchart LR
     D[Document upload] --> X[Local parser / OCR]
     X --> UI[Streamlit UI]
-    X -. consent .-> DX[OpenAI document extraction]
+    X --> DX[OpenAI document extraction]
     DX --> UI
     UI --> S[ExpenseService]
     S --> DB[(SQLite / SQLAlchemy)]

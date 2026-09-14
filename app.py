@@ -146,6 +146,28 @@ class DocumentJobState:
     document: ProcessedDocument | None
     error: str | None
     pending: bool
+    analysis: DocumentAnalysisResult | None = None
+
+
+def _read_and_analyze_document(
+    analyzer: ExpenseAnalyzer,
+    routing_categories: list[str],
+    original_name: str,
+    mime_type: str | None,
+    content: bytes,
+) -> tuple[ProcessedDocument, DocumentAnalysisResult | None]:
+    """Read a document locally, then let the model extract its fields.
+
+    Both halves run on the worker thread so the Streamlit script is never blocked
+    by OCR or by an OpenAI round trip. The local pass still decides admissibility;
+    the model only fills in what it can read, and cannot promote a rejected file.
+    """
+    document = process_document(original_name, mime_type, content)
+    if not document.extraction.is_expense_evidence:
+        # Nothing to extract from a file the gate will refuse anyway, and no reason
+        # to send it anywhere.
+        return document, None
+    return document, analyzer.analyze_document(document, routing_categories)
 
 
 def _document_job_state(
@@ -154,8 +176,9 @@ def _document_job_state(
     original_name: str,
     mime_type: str | None,
     content: bytes,
+    routing_categories: list[str],
 ) -> DocumentJobState:
-    """Read a document in the background so OCR never blocks the Streamlit script.
+    """Read and analyze a document in the background, off the Streamlit script.
 
     Results are cached by hand rather than with @st.cache_data because the work runs
     in a worker thread, which has no Streamlit script context.
@@ -168,13 +191,18 @@ def _document_job_state(
     if finished is not None:
         return finished
 
-    jobs: dict[str, Future[ProcessedDocument]] = st.session_state.setdefault(
-        DOCUMENT_JOBS_KEY, {}
+    jobs: dict[str, Future[tuple[ProcessedDocument, DocumentAnalysisResult | None]]] = (
+        st.session_state.setdefault(DOCUMENT_JOBS_KEY, {})
     )
     job = jobs.get(key)
     if job is None:
         job = resources.document_executor.submit(
-            process_document, original_name, mime_type, content
+            _read_and_analyze_document,
+            _ensure_analyzer(resources, "analyze_document"),
+            routing_categories,
+            original_name,
+            mime_type,
+            content,
         )
         jobs[key] = job
     if not job.done():
@@ -182,7 +210,8 @@ def _document_job_state(
 
     jobs.pop(key, None)
     try:
-        results[key] = DocumentJobState(job.result(), None, False)
+        document, analysis = job.result()
+        results[key] = DocumentJobState(document, None, False, analysis)
     except Exception as exc:
         if not _is_user_safe_error(exc):
             # Record the failure before re-raising. The job was just removed above,
@@ -211,7 +240,7 @@ def _render_document_progress(digest: str) -> None:
     if job is None:
         st.caption("Finishing up…")
         return
-    st.info("Reading the document locally… Submitting unlocks when it finishes.")
+    st.info("Reading and analyzing the document… Submitting unlocks when it finishes.")
     st.caption("Scanned files run OCR, which can take up to a minute.")
 
 
@@ -370,10 +399,18 @@ def render_claim_form(resources: AppResources, user_id: int) -> None:
             type=["pdf", "jpg", "jpeg", "png", "webp"],
             key=f"claim_document_{nonce}",
             help=(
-                "PDF or image, up to 8 MB. Local extraction runs first. Optional AI "
-                "analysis sends data to OpenAI only after explicit consent."
+                "PDF or image, up to 8 MB. Images are sent to OpenAI for extraction."
+                if resources.settings.ai_send_document_images
+                else "PDF or image, up to 8 MB. Locally extracted text is sent to "
+                "OpenAI for extraction, with common banking and personal identifiers "
+                "removed. The file itself never leaves this app."
             ),
             max_upload_size=8,
+        )
+        st.caption(
+            ":material/info: Uploaded documents are read locally, then their text is "
+            "sent to OpenAI to extract the fields below. Every field stays editable, "
+            "and the original file is never stored."
         )
         document: ProcessedDocument | None = None
         document_error: str | None = None
@@ -391,6 +428,7 @@ def render_claim_form(resources: AppResources, user_id: int) -> None:
                 uploaded_file.name,
                 uploaded_file.type,
                 uploaded_file.getvalue(),
+                list(category_by_name),
             )
             document, document_error, document_pending = (
                 state.document,
@@ -402,52 +440,19 @@ def render_claim_form(resources: AppResources, user_id: int) -> None:
             elif document_error:
                 st.error(document_error)
         if document is not None:
-            analysis_key = f"_document_analysis_{nonce}_{document_token}"
-            analysis_result: DocumentAnalysisResult | None = st.session_state.get(
-                analysis_key
-            )
+            analysis_result: DocumentAnalysisResult | None = state.analysis
             if analysis_result is not None:
                 document = replace(document, extraction=analysis_result.extraction)
             _render_document_extraction(document, analysis_result)
 
             extraction = document.extraction
-            if analysis_result is None and any(
-                value is None
-                for value in (
-                    extraction.vendor,
-                    extraction.document_number,
-                    extraction.amount,
-                    extraction.expense_date,
-                )
+            if analysis_result is not None and analysis_result.source is (
+                AssessmentSource.FALLBACK
             ):
-                st.info(
-                    "Local OCR extracted only part of this document. To improve the "
-                    "missing fields, tick the consent box and run AI analysis below."
+                st.warning(
+                    "AI extraction was unavailable, so no fields were filled in. "
+                    "Enter the amount, vendor, and date manually from the document."
                 )
-
-            consent = st.checkbox(
-                "I agree to send this document to OpenAI for AI field extraction.",
-                key=f"document_ai_consent_{nonce}_{document_token}",
-                help=(
-                    "Images are sent to OpenAI; PDFs use locally extracted text with common "
-                    "banking and personal identifiers removed."
-                    if resources.settings.ai_send_document_images
-                    else "Only locally extracted text is sent, with common banking and "
-                    "personal identifiers removed. The file itself never leaves this app."
-                ),
-            )
-            if st.button(
-                "Analyze or improve fields with AI",
-                key=f"document_ai_analyze_{nonce}_{document_token}",
-                disabled=not consent,
-                use_container_width=True,
-            ):
-                analyzer = _ensure_analyzer(resources, "analyze_document")
-                with st.spinner("Analyzing document fields with AI…"):
-                    st.session_state[analysis_key] = analyzer.analyze_document(
-                        document, list(category_by_name)
-                    )
-                st.rerun()
 
         extraction = document.extraction if document else None
         routing_hint = (

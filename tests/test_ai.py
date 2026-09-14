@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import date
 from decimal import Decimal
 from types import SimpleNamespace
@@ -244,7 +245,14 @@ def test_ai_extracts_unknown_document_fields_and_dynamic_category(
     assert "IBAN" not in str(captured["input"])
 
 
-def test_document_ai_failure_keeps_local_extraction(monkeypatch: object) -> None:
+def test_document_ai_failure_leaves_the_fields_empty(monkeypatch: object) -> None:
+    """A failed model call must not leave regex-picked values behind.
+
+    The local rules mispick silently on layouts they were not written for — an
+    Uber receipt's "Trip fare" instead of its discounted "Total" — so a wrong
+    amount that looks extracted is worse than a blank the employee must fill in.
+    """
+
     class FailingResponses:
         def parse(self, **_kwargs: object) -> None:
             raise TimeoutError("document request timed out")
@@ -260,10 +268,17 @@ def test_document_ai_failure_keeps_local_extraction(monkeypatch: object) -> None
     )
 
     assert result.source == AssessmentSource.FALLBACK
-    assert result.extraction.category_hint == document.extraction.category_hint
+    assert result.extraction.amount is None
+    assert result.extraction.vendor is None
+    assert result.extraction.expense_date is None
+    # Classification stays local: the gate is never the model's to open, and a
+    # failed call must not turn an admissible receipt into a rejected file.
+    assert result.extraction.is_expense_evidence is (
+        document.extraction.is_expense_evidence
+    )
     assert result.extraction.processing_method == "local OCR"
     assert "TimeoutError" in (result.error_message or "")
-    assert any("local OCR" in warning for warning in result.extraction.warnings)
+    assert any("manually" in warning for warning in result.extraction.warnings)
 
 
 def test_client_creation_failure_degrades_to_fallback(monkeypatch: object) -> None:
@@ -711,3 +726,56 @@ _FALLBACK_ASSESSMENT = AssessmentResult(
     model="rule-based",
     latency_ms=0,
 )
+
+
+def test_model_total_overrides_a_mispicked_local_amount(monkeypatch: object) -> None:
+    """The regression these extraction changes exist for.
+
+    A real Uber receipt lists "Trip fare PLN 40.94" above "Total PLN 28.66" after a
+    promotion. The local rules pick the larger line and attach no warning, so the
+    claim would be filed 43% too high. The model reads the payable total, and the
+    merge must prefer it over the local guess.
+    """
+
+    class FakeResponses:
+        def parse(self, **_kwargs: object) -> SimpleNamespace:
+            return SimpleNamespace(
+                output_parsed=StructuredDocumentExtraction(
+                    document_kind="receipt",
+                    is_expense_evidence=True,
+                    vendor="Uber",
+                    document_number=None,
+                    original_total="28.66",
+                    currency="PLN",
+                    expense_date="2026-09-13",
+                    suggested_category="Ground Transportation",
+                    routing_category="Travel",
+                    description="Ride receipt after promotion",
+                    confidence_percent=95,
+                    warnings=[],
+                )
+            )
+
+    class FakeOpenAI:
+        def __init__(self, **_kwargs: object):
+            self.responses = FakeResponses()
+
+    monkeypatch.setattr("expense_approval.ai.OpenAI", FakeOpenAI)
+    document = replace(
+        _unknown_image_document(),
+        extraction=replace(
+            _unknown_image_document().extraction,
+            kind=DocumentKind.RECEIPT,
+            amount=Decimal("40.94"),  # what the local rules mispick
+            currency="PLN",
+            expense_date=None,
+        ),
+    )
+    result = ExpenseAnalyzer("test-key", "gpt-5-mini").analyze_document(
+        document, ["Office", "Travel", "Other"]
+    )
+
+    assert result.extraction.amount == Decimal("28.66")
+    assert result.extraction.vendor == "Uber"
+    assert result.extraction.expense_date == date(2026, 9, 13)
+    assert result.extraction.routing_category == "Travel"
