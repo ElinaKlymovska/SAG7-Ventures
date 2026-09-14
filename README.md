@@ -51,7 +51,8 @@ cp .streamlit/secrets.example.toml .streamlit/secrets.toml
 ```
 
 Then add `OPENAI_API_KEY` to `.streamlit/secrets.toml`. The default model is `gpt-5-mini` and can
-be changed with `OPENAI_MODEL`. The real secrets file is ignored by Git.
+be changed with `OPENAI_MODEL`. `AI_SEND_DOCUMENT_IMAGES` (default `false`) controls whether
+document images may be sent to OpenAI vision. The real secrets file is ignored by Git.
 
 ## Demo accounts
 
@@ -78,7 +79,8 @@ password because every account and claim is fictional and the deployment is a pu
    the non-sensitive reimbursement reference, and edit it if needed.
 4. Submit the expense, then open a second private browser window.
 5. Sign in there as `approver@expense-demo.local`; the claim appears within two seconds. Its
-   supporting file is available only inside the authorized claim view.
+   extracted document fields, file name, and checksum are visible only inside the authorized
+   claim view; the original file itself was never stored.
 6. Open the seeded `$780.00` Office claim describing a London flight. The AI or labeled fallback
    flags the category mismatch while both decision buttons remain active.
 7. Try Reject without a comment, then reject with a reason. The employee view updates within two
@@ -109,11 +111,15 @@ reviews every field before submission. A detected UAH, PLN, or INR total is disp
 original currency, but the employee must enter the correct USD claim amount because currency
 conversion is outside the MVP.
 
-The raw attachment is stored with the claim in SQLite so only its employee and assigned approver
-can retrieve it. Local extraction never calls an external service. Optional AI extraction is
-explicitly consent-based: images are sent to OpenAI vision, while PDFs send locally extracted
-text after common banking identifiers, long IDs, addresses, and emails are removed. Payment
-details and user identity are never included. Responses use `store=false`. The supplied example
+The raw attachment is never stored. Once the fields are extracted, the file is discarded and the
+claim keeps only the extracted values, the original filename, and a checksum, which the employee
+and the assigned approver see on the claim. Local extraction never calls an external service. Optional AI extraction is
+explicitly consent-based and sends locally extracted text after common banking identifiers, long
+IDs, addresses, and emails are removed. Document images are withheld by default, because an image
+cannot be sanitized the way text can; setting `AI_SEND_DOCUMENT_IMAGES = true` opts into sending
+images to OpenAI vision. Payment details and user identity are never included. Whether a file
+counts as expense evidence is decided locally: the model can withdraw that status but never grant
+it, so instructions hidden inside an uploaded document cannot pass themselves off as a receipt. Responses use `store=false`. The supplied example
 archive is intentionally not included in this public repository because it contains personal and
 payment information; automated tests use synthetic equivalents.
 
@@ -141,8 +147,10 @@ flowchart LR
   evidence, and produces reviewable field suggestions. It never calls an external service.
 - `src/expense_approval/ai.py` has three bounded Structured Output flows. Approver assessment and
   payment-reference suggestions receive only `amount_usd`, `category`, `description`, and
-  `expense_date`. Consent-based document extraction receives an image or sanitized OCR text plus
-  configured routing category names. It never receives existing payment details or user identity.
+  `expense_date`. Consent-based document extraction receives sanitized OCR text — and an image
+  only when `AI_SEND_DOCUMENT_IMAGES` is enabled — plus configured routing category names. It
+  never receives existing payment details or user identity, and it cannot promote a file to
+  expense evidence that local classification rejected.
 - SQLAlchemy stores money as integer cents and Alembic owns the schema.
 - SQLite runs in WAL mode with a five-second busy timeout. Status decisions use an atomic
   conditional update, so a stale second decision cannot overwrite the first.
@@ -182,9 +190,10 @@ pytest --cov=expense_approval
 ```
 
 The suite covers validation, routing, dual roles, access isolation, all transitions, mandatory
-rejection comments, concurrent decisions, document classification and extraction, attachment
-integrity and persistence, AI payload privacy, structured response parsing, fallback behavior,
-caching, sanitized OCR, dynamic AI document fields and category routing, editable payment-detail
+rejection comments, concurrent decisions, document classification and extraction, upload
+signature and size validation, the OCR contract with Tesseract and Poppler, AI payload privacy,
+money parsing across separator styles, structured response parsing, fallback behavior, caching,
+sanitized OCR, dynamic AI document fields and category routing, editable payment-detail
 suggestions, and Streamlit workflow smoke tests.
 
 ## Deploy to Streamlit Community Cloud
@@ -200,6 +209,7 @@ suggestions, and Streamlit workflow smoke tests.
    OPENAI_API_KEY = "your-key"
    OPENAI_MODEL = "gpt-5-mini"
    AI_TIMEOUT_SECONDS = 10.0
+   AI_SEND_DOCUMENT_IMAGES = false
    ```
 
 5. Share the generated `streamlit.app` URL together with the repository and demo credentials.
@@ -211,9 +221,10 @@ Never commit `.streamlit/secrets.toml` or an API key.
 - SQLite is appropriate for this reviewable demo, not for a production financial system. The
   local database may reset when a Community Cloud instance is rebuilt.
 - "Live" status uses a two-second Streamlit fragment refresh, not database push subscriptions.
-- Attachments are stored as SQLite BLOBs and share the demo database's ephemeral lifecycle. A
-  production version should use private object storage, malware scanning, retention policies,
-  and an audit trail.
+- Uploaded files are discarded once their fields are extracted; only the extracted values, the
+  file name, and a checksum are kept, so a submitted claim cannot be re-verified against its
+  original document. A production version that needs the originals should add private object
+  storage, malware scanning, retention policies, and an audit trail.
 - Payment details are synthetic free text and are visible only to the claimant and assigned
   approver. The UI warns users not to enter real financial data.
 - Registration, editing submitted claims, notifications, currency conversion, SSO, audit

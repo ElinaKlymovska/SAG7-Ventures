@@ -431,6 +431,12 @@ def _extract_document_number(text: str) -> str | None:
     return None
 
 
+# A lone separator followed by runs of exactly three digits is thousands grouping
+# ("1,234" and "1.234" are both 1234), not a fraction. Precompiled because
+# parse_money runs once per money-like match per label per line.
+COMMA_GROUPED_PATTERN = re.compile(r"\d{1,3}(?:,\d{3})+")
+DOT_GROUPED_PATTERN = re.compile(r"\d{1,3}(?:\.\d{3})+")
+
 MONEY_PATTERN = re.compile(
     r"(?<!\d)(\d{1,3}(?:[ \u00a0,.]\d{3})+(?:[.,]\d{2,4})?"
     r"|\d{1,9}[.,]\d{2,4})(?!\d)"
@@ -466,7 +472,7 @@ def _extract_payable_amount(text: str) -> Decimal | None:
                 continue
             value_text = " ".join((line[match.end() :], *lines[index + 1 : index + 3]))
             for raw_value in MONEY_PATTERN.findall(value_text):
-                parsed = _parse_money(raw_value)
+                parsed = parse_money(raw_value)
                 if parsed is not None:
                     values.append(parsed)
         if values:
@@ -474,12 +480,23 @@ def _extract_payable_amount(text: str) -> Decimal | None:
     return None
 
 
-def _parse_money(value: str) -> Decimal | None:
+def parse_money(value: str) -> Decimal | None:
+    """Parse a positive money amount written in any of the separator styles we meet.
+
+    Handles ``1,234.56``, ``1.234,56``, ``1 234,56`` and ``1234.56``. A lone separator
+    followed by exactly three digits groups thousands (``1,234`` is 1234.00), while two
+    or four digits are a fraction (``1,23`` is 1.23). Returns ``None`` when the text is
+    not a positive number.
+    """
     compact = value.replace(" ", "").replace("\u00a0", "")
     if "," in compact and "." in compact:
         decimal_separator = "," if compact.rfind(",") > compact.rfind(".") else "."
         thousands_separator = "." if decimal_separator == "," else ","
         compact = compact.replace(thousands_separator, "").replace(decimal_separator, ".")
+    elif COMMA_GROUPED_PATTERN.fullmatch(compact):
+        compact = compact.replace(",", "")
+    elif DOT_GROUPED_PATTERN.fullmatch(compact):
+        compact = compact.replace(".", "")
     elif "," in compact:
         compact = compact.replace(",", ".")
     try:

@@ -12,7 +12,6 @@ from sqlalchemy import (
     Enum,
     ForeignKey,
     Integer,
-    LargeBinary,
     String,
     Text,
     UniqueConstraint,
@@ -192,7 +191,6 @@ class ExpenseDocument(Base):
     mime_type: Mapped[str] = mapped_column(String(100))
     size_bytes: Mapped[int] = mapped_column(Integer)
     sha256: Mapped[str] = mapped_column(String(64), index=True)
-    content: Mapped[bytes] = mapped_column(LargeBinary)
     document_kind: Mapped[str] = mapped_column(String(40))
     processing_method: Mapped[str] = mapped_column(String(80))
     vendor: Mapped[str | None] = mapped_column(String(120), nullable=True)

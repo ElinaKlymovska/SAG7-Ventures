@@ -16,6 +16,7 @@ class Settings:
     openai_api_key: str | None
     openai_model: str = "gpt-5-mini"
     ai_timeout_seconds: float = 10.0
+    ai_send_document_images: bool = False
 
 
 def _value(name: str, secrets: Mapping[str, Any] | None, default: Any = None) -> Any:
@@ -29,6 +30,12 @@ def _value(name: str, secrets: Mapping[str, Any] | None, default: Any = None) ->
     return os.getenv(name, default)
 
 
+def _as_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().casefold() in {"1", "true", "yes", "on"}
+
+
 def load_settings(secrets: Mapping[str, Any] | None = None) -> Settings:
     database_url = str(
         _value("DATABASE_URL", secrets, f"sqlite:///{DEFAULT_DATABASE_PATH}")
@@ -36,9 +43,11 @@ def load_settings(secrets: Mapping[str, Any] | None = None) -> Settings:
     api_key = str(_value("OPENAI_API_KEY", secrets, "")).strip() or None
     model = str(_value("OPENAI_MODEL", secrets, "gpt-5-mini")).strip()
     timeout = float(_value("AI_TIMEOUT_SECONDS", secrets, 10.0))
+    send_images = _as_bool(_value("AI_SEND_DOCUMENT_IMAGES", secrets, False))
     return Settings(
         database_url=database_url,
         openai_api_key=api_key,
         openai_model=model,
         ai_timeout_seconds=timeout,
+        ai_send_document_images=send_images,
     )

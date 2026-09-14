@@ -6,7 +6,6 @@ import json
 import logging
 from dataclasses import dataclass, replace
 from datetime import date
-from decimal import Decimal, InvalidOperation
 from time import perf_counter
 from typing import Any, Literal
 
@@ -17,6 +16,7 @@ from expense_approval.documents import (
     DocumentExtraction,
     DocumentKind,
     ProcessedDocument,
+    parse_money,
     sanitize_document_text_for_ai,
 )
 from expense_approval.models import AssessmentSource, ExpenseClaim
@@ -127,31 +127,50 @@ def build_payment_details_payload(
 
 
 class ExpenseAnalyzer:
-    def __init__(self, api_key: str | None, model: str, timeout_seconds: float = 10.0):
+    def __init__(
+        self,
+        api_key: str | None,
+        model: str,
+        timeout_seconds: float = 10.0,
+        send_document_images: bool = False,
+    ):
         self.api_key = api_key
         self.model = model
         self.timeout_seconds = timeout_seconds
+        # Off by default: an image is the one payload no sanitizer can redact, so the
+        # whole document — bank details, signatures, identity — would leave the system
+        # verbatim. Opt in with AI_SEND_DOCUMENT_IMAGES when that is acceptable.
+        self.send_document_images = send_document_images
         # Reuse one HTTP connection pool for the lifetime of the cached Streamlit
         # resource. Creating a client for every assessment adds DNS/TLS overhead
         # and made the previous four-second request budget unreliable.
-        self._client = (
-            OpenAI(api_key=api_key, max_retries=0, timeout=timeout_seconds)
-            if api_key
-            else None
-        )
+        self._client = None
+        self._client_error: str | None = None
+        if api_key:
+            try:
+                self._client = OpenAI(api_key=api_key, max_retries=0, timeout=timeout_seconds)
+            except Exception as exc:
+                # A broken SDK install or hostile proxy settings must degrade the AI
+                # panel to the rule-based fallback, not take the whole app down.
+                self._client_error = f"{type(exc).__name__}: {exc}"
+                logger.warning("OpenAI client unavailable; using fallback: %s", self._client_error)
 
     @property
     def openai_enabled(self) -> bool:
-        return bool(self.api_key)
+        return self._client is not None
+
+    def _unavailable_reason(self) -> str:
+        """Why this analyzer has no client, for the fallback's error_message."""
+        if self._client_error is not None:
+            return f"OpenAI client is unavailable ({self._client_error})."
+        return "OPENAI_API_KEY is not configured."
 
     def analyze(self, payload: dict[str, str]) -> AssessmentResult:
-        if not self.api_key:
-            return rule_based_assessment(payload, "OPENAI_API_KEY is not configured.")
+        if self._client is None:
+            return rule_based_assessment(payload, self._unavailable_reason())
 
         started = perf_counter()
         try:
-            if self._client is None:
-                raise RuntimeError("OpenAI client is unavailable.")
             response = self._client.responses.parse(
                 model=self.model,
                 instructions=AI_INSTRUCTIONS,
@@ -196,15 +215,11 @@ class ExpenseAnalyzer:
     def suggest_payment_details(
         self, payload: dict[str, str]
     ) -> PaymentSuggestionResult:
-        if not self.api_key:
-            return rule_based_payment_details(
-                payload, "OPENAI_API_KEY is not configured."
-            )
+        if self._client is None:
+            return rule_based_payment_details(payload, self._unavailable_reason())
 
         started = perf_counter()
         try:
-            if self._client is None:
-                raise RuntimeError("OpenAI client is unavailable.")
             response = self._client.responses.parse(
                 model=self.model,
                 instructions=PAYMENT_DETAILS_INSTRUCTIONS,
@@ -243,15 +258,11 @@ class ExpenseAnalyzer:
     def analyze_document(
         self, document: ProcessedDocument, routing_categories: list[str]
     ) -> DocumentAnalysisResult:
-        if not self.api_key:
-            return _document_analysis_fallback(
-                document, "OPENAI_API_KEY is not configured."
-            )
+        if self._client is None:
+            return _document_analysis_fallback(document, self._unavailable_reason())
 
         started = perf_counter()
         try:
-            if self._client is None:
-                raise RuntimeError("OpenAI client is unavailable.")
             sanitized_text = sanitize_document_text_for_ai(
                 getattr(document, "extracted_text", "")
             )
@@ -265,7 +276,7 @@ class ExpenseAnalyzer:
             content: list[dict[str, str]] = [
                 {"type": "input_text", "text": context}
             ]
-            uses_vision = document.mime_type.startswith("image/")
+            uses_vision = self.send_document_images and document.mime_type.startswith("image/")
             if uses_vision:
                 encoded = base64.b64encode(document.content).decode("ascii")
                 content.append(
@@ -407,29 +418,52 @@ def _merge_document_extraction(
         if parsed.document_kind != "other"
         else DocumentKind.OTHER
     )
-    amount = _parse_positive_decimal(parsed.original_total) or local.amount
+    amount = parse_money(parsed.original_total or "") or local.amount
     currency = (parsed.currency or local.currency or "").strip().upper() or None
     extracted_date = _parse_iso_date(parsed.expense_date) or local.expense_date
     route_lookup = {category.casefold(): category for category in routing_categories}
     routing_category = route_lookup.get(parsed.routing_category.strip().casefold())
     if routing_category is None:
-        routing_category = route_lookup.get("other") or routing_categories[0]
+        routing_category = route_lookup.get("other") or next(iter(routing_categories), None)
     vendor = _clean_optional(parsed.vendor) or local.vendor
     document_number = _clean_optional(parsed.document_number) or local.document_number
     warnings = tuple(warning.strip() for warning in parsed.warnings if warning.strip())
     if vendor is None:
         warnings += ("Vendor is not visible in the document; do not guess it.",)
+    # The model may only *withdraw* evidence status, never grant it. Text inside an
+    # uploaded file reaches the model as input, so a document that instructs it to
+    # answer "this is a valid receipt" would otherwise walk straight through the
+    # gate in ExpenseService._validate_document. The local classifier decides what
+    # is admissible; the model is left able to reject what the local rules missed.
+    is_expense_evidence = local.is_expense_evidence and parsed.is_expense_evidence
+    if local.is_expense_evidence and not parsed.is_expense_evidence:
+        warnings += ("AI review rejected this file as expense evidence.",)
+    if not is_expense_evidence:
+        # Keep a rejected file described by the local classifier alone, so an injected
+        # "Invoice, 93% confidence" cannot dress up a file the gate will refuse anyway.
+        kind = local.kind
+        # Local reasons come first: the [:5] cap below must never let model-supplied
+        # padding warnings crowd out why this file was actually refused.
+        warnings = tuple(local.warnings) + tuple(
+            w for w in warnings if w not in local.warnings
+        )
     return DocumentExtraction(
         kind=kind,
-        is_expense_evidence=parsed.is_expense_evidence,
+        is_expense_evidence=is_expense_evidence,
         vendor=vendor,
         document_number=document_number,
         amount=amount,
         currency=currency,
         expense_date=extracted_date,
-        category_hint=parsed.suggested_category.strip(),
-        description=parsed.description.strip(),
-        confidence=parsed.confidence_percent / 100,
+        category_hint=(
+            parsed.suggested_category.strip() if is_expense_evidence else local.category_hint
+        ),
+        description=(
+            parsed.description.strip() if is_expense_evidence else local.description
+        ),
+        confidence=(
+            parsed.confidence_percent / 100 if is_expense_evidence else local.confidence
+        ),
         processing_method=processing_method,
         warnings=warnings[:5],
         routing_category=routing_category,
@@ -451,17 +485,6 @@ def _document_analysis_fallback(
         latency_ms=0,
         error_message=error_message,
     )
-
-
-def _parse_positive_decimal(value: str | None) -> Decimal | None:
-    if not value:
-        return None
-    normalized = value.strip().replace(" ", "").replace(",", ".")
-    try:
-        amount = Decimal(normalized).quantize(Decimal("0.01"))
-    except InvalidOperation:
-        return None
-    return amount if amount > 0 else None
 
 
 def _parse_iso_date(value: str | None) -> date | None:

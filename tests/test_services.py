@@ -111,7 +111,7 @@ def test_approver_only_sees_assigned_categories(
 
 def test_rejection_requires_comment(service: ExpenseService, ids: dict[str, int]) -> None:
     claim_id = ids[MISMATCH_DESCRIPTION]
-    with pytest.raises(ValidationError, match="rejection comment"):
+    with pytest.raises(ValidationError, match="[Rr]ejection comment"):
         service.decide_claim(ids[APPROVER], claim_id, ExpenseStatus.REJECTED, "  ")
 
     rejected = service.decide_claim(
@@ -121,6 +121,24 @@ def test_rejection_requires_comment(service: ExpenseService, ids: dict[str, int]
     assert rejected.decision_comment == "Please use the Travel category."
     with pytest.raises(TransitionError):
         service.decide_claim(ids[APPROVER], claim_id, ExpenseStatus.APPROVED)
+
+
+def test_rejection_comment_must_be_meaningful(
+    service: ExpenseService, ids: dict[str, int]
+) -> None:
+    with pytest.raises(ValidationError, match="at least 10 characters"):
+        service.decide_claim(
+            ids[APPROVER], ids[MISMATCH_DESCRIPTION], ExpenseStatus.REJECTED, "no"
+        )
+
+
+def test_approval_still_allows_empty_comment(
+    service: ExpenseService, ids: dict[str, int]
+) -> None:
+    claim_id = ids["Ergonomic keyboard and mouse for the home office"]
+    approved = service.decide_claim(ids[APPROVER], claim_id, ExpenseStatus.APPROVED, "")
+    assert approved.status is ExpenseStatus.APPROVED
+    assert not approved.decision_comment
 
 
 def test_owner_can_only_withdraw_pending_claim(
