@@ -13,3 +13,5 @@ data/*.sqlite3
 data/*.sqlite3-*
 !data/.gitkeep
 work/
+data copy/
+/ТЗ _ AI .pdf
