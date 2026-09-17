@@ -17,6 +17,8 @@ class Settings:
     openai_model: str = "gpt-5-mini"
     ai_timeout_seconds: float = 10.0
     ai_send_document_images: bool = False
+    # Master switch for the three OpenAI calls. Off: labeled local fallback only.
+    ai_llm_calls_enabled: bool = False
 
 
 def _value(name: str, secrets: Mapping[str, Any] | None, default: Any = None) -> Any:
@@ -44,10 +46,12 @@ def load_settings(secrets: Mapping[str, Any] | None = None) -> Settings:
     model = str(_value("OPENAI_MODEL", secrets, "gpt-5-mini")).strip()
     timeout = float(_value("AI_TIMEOUT_SECONDS", secrets, 10.0))
     send_images = _as_bool(_value("AI_SEND_DOCUMENT_IMAGES", secrets, False))
+    llm_calls = _as_bool(_value("AI_LLM_CALLS_ENABLED", secrets, False))
     return Settings(
         database_url=database_url,
         openai_api_key=api_key,
         openai_model=model,
         ai_timeout_seconds=timeout,
         ai_send_document_images=send_images,
+        ai_llm_calls_enabled=llm_calls,
     )
