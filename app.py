@@ -47,7 +47,7 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-RESOURCE_CACHE_VERSION = "ai-image-optin-v1"
+RESOURCE_CACHE_VERSION = "ai-llm-calls-off-v1"
 DOCUMENT_PROCESSOR_VERSION = "multiline-invoice-fields-v2"
 DOCUMENT_JOBS_KEY = "_document_jobs"
 DOCUMENT_RESULTS_KEY = "_document_results"
@@ -89,6 +89,7 @@ def get_resources(settings: Settings, cache_version: str) -> AppResources:
             settings.openai_model,
             settings.ai_timeout_seconds,
             settings.ai_send_document_images,
+            settings.ai_llm_calls_enabled,
         ),
         executor=ThreadPoolExecutor(max_workers=4, thread_name_prefix="expense-ai"),
         # A separate pool so a slow OCR run cannot starve the approver assessments.
@@ -321,6 +322,8 @@ def render_login(resources: AppResources) -> None:
             )
             if resources.analyzer.openai_enabled:
                 st.success(f"OpenAI analysis enabled · {resources.settings.openai_model}")
+            elif not resources.settings.ai_llm_calls_enabled:
+                st.info("LLM calls disabled · rule-based fallback is active")
             else:
                 st.info("OpenAI key not configured · rule-based fallback is active")
 
@@ -924,6 +927,7 @@ def _ensure_analyzer(resources: AppResources, method_name: str) -> ExpenseAnalyz
             resources.settings.openai_model,
             resources.settings.ai_timeout_seconds,
             resources.settings.ai_send_document_images,
+            resources.settings.ai_llm_calls_enabled,
         )
     return resources.analyzer
 

@@ -68,6 +68,37 @@ def test_missing_key_uses_labeled_fallback(service: ExpenseService, ids: dict[st
     assert "OPENAI_API_KEY" in (result.error_message or "")
 
 
+def test_llm_calls_disabled_skip_openai_even_with_a_key(monkeypatch: object) -> None:
+    created: list[object] = []
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs: object) -> None:
+            created.append(kwargs)
+
+    monkeypatch.setattr("expense_approval.ai.OpenAI", FakeOpenAI)
+    analyzer = ExpenseAnalyzer("test-key", "gpt-5-mini", llm_calls_enabled=False)
+    payload = {
+        "amount_usd": "12.00",
+        "category": "Office",
+        "description": "A box of blue ballpoint pens",
+        "expense_date": "2026-09-10",
+    }
+
+    assert analyzer.openai_enabled is False
+    assert created == []
+
+    assessment = analyzer.analyze(payload)
+    suggestion = analyzer.suggest_payment_details(payload)
+    document = analyzer.analyze_document(_unknown_image_document(), ["Office", "Other"])
+
+    assert assessment.source == AssessmentSource.FALLBACK
+    assert "LLM calls are disabled" in (assessment.error_message or "")
+    assert suggestion.source == AssessmentSource.FALLBACK
+    assert document.source == AssessmentSource.FALLBACK
+    assert document.extraction.amount is None
+    assert created == []
+
+
 def test_openai_structured_response_is_parsed(monkeypatch: object) -> None:
     captured: dict[str, object] = {}
 

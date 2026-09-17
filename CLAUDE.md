@@ -92,13 +92,15 @@ New migration: `alembic revision --autogenerate -m "..."` from the repo root
 
 `load_settings()` in [src/expense_approval/config.py](src/expense_approval/config.py) reads
 `st.secrets` first, then environment variables: `DATABASE_URL`, `OPENAI_API_KEY`, `OPENAI_MODEL`
-(default `gpt-5-mini`), `AI_TIMEOUT_SECONDS`, `AI_SEND_DOCUMENT_IMAGES` (default `false`).
+(default `gpt-5-mini`), `AI_TIMEOUT_SECONDS`, `AI_LLM_CALLS_ENABLED` (default `false`),
+`AI_SEND_DOCUMENT_IMAGES` (default `false`).
 
-Without `OPENAI_API_KEY` the claim workflow still works and the approver's AI panel labels
-itself a rule-based fallback — keep that path working. Document extraction is the exception: the
-model owns it, so without a key `_document_analysis_fallback` clears the fields instead of
-showing regex guesses. `.streamlit/secrets.toml` is gitignored; the template is
-`.streamlit/secrets.example.toml`.
+`AI_LLM_CALLS_ENABLED` is the master switch for the three OpenAI calls. The app currently
+starts with it off: without a key *or* with the switch off, the claim workflow still works
+and the approver's AI panel labels itself a rule-based fallback. Document extraction is the
+exception: the model owns it, so without a live call `_document_analysis_fallback` clears
+the fields instead of showing regex guesses. `.streamlit/secrets.toml` is gitignored; the
+template is `.streamlit/secrets.example.toml`.
 
 ## Related docs
 

@@ -42,10 +42,10 @@ The final command, `streamlit run app.py`, is the single command used to launch 
 creates `data/expense_approval.sqlite3`, applies the Alembic migrations, and loads the demo
 dataset automatically. The claim workflow runs without an API key, and the approver's AI panel
 is then explicitly labeled as a rule-based fallback. Document extraction is the exception: it is
-the model's job, so without a key the uploaded document is still classified and accepted, but no
-fields are filled in and the employee types them from the document. Set `OPENAI_API_KEY` to see
-extraction work. Image and scanned-PDF OCR additionally requires Poppler and Tesseract; Community
-Cloud installs them from `packages.txt`.
+the model's job, so without a live LLM call the uploaded document is still classified and
+accepted, but no fields are filled in and the employee types them from the document. Set
+`OPENAI_API_KEY` and `AI_LLM_CALLS_ENABLED = true` to see extraction work. Image and scanned-PDF
+OCR additionally requires Poppler and Tesseract; Community Cloud installs them from `packages.txt`.
 
 To enable OpenAI analysis:
 
@@ -53,7 +53,11 @@ To enable OpenAI analysis:
 cp .streamlit/secrets.example.toml .streamlit/secrets.toml
 ```
 
-Then add `OPENAI_API_KEY` to `.streamlit/secrets.toml`. The default model is `gpt-5-mini` and can
+Then add `OPENAI_API_KEY` to `.streamlit/secrets.toml` and set `AI_LLM_CALLS_ENABLED = true`.
+The three OpenAI calls (approver consistency check, payment-reference suggestion, and
+document extraction) are off by default: the claim workflow stays up, the approver panel
+is a labeled rule-based fallback, and uploaded documents are classified locally with empty
+fields for the employee to fill in. The default model is `gpt-5-mini` and can
 be changed with `OPENAI_MODEL`. `AI_SEND_DOCUMENT_IMAGES` (default `false`) controls whether
 document images may be sent to OpenAI vision. The real secrets file is ignored by Git.
 
@@ -212,6 +216,7 @@ suggestions, and Streamlit workflow smoke tests.
    OPENAI_API_KEY = "your-key"
    OPENAI_MODEL = "gpt-5-mini"
    AI_TIMEOUT_SECONDS = 10.0
+   AI_LLM_CALLS_ENABLED = false
    AI_SEND_DOCUMENT_IMAGES = false
    ```
 
