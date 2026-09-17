@@ -133,6 +133,7 @@ class ExpenseAnalyzer:
         model: str,
         timeout_seconds: float = 10.0,
         send_document_images: bool = False,
+        llm_calls_enabled: bool = True,
     ):
         self.api_key = api_key
         self.model = model
@@ -141,12 +142,13 @@ class ExpenseAnalyzer:
         # whole document — bank details, signatures, identity — would leave the system
         # verbatim. Opt in with AI_SEND_DOCUMENT_IMAGES when that is acceptable.
         self.send_document_images = send_document_images
+        self.llm_calls_enabled = llm_calls_enabled
         # Reuse one HTTP connection pool for the lifetime of the cached Streamlit
         # resource. Creating a client for every assessment adds DNS/TLS overhead
         # and made the previous four-second request budget unreliable.
         self._client = None
         self._client_error: str | None = None
-        if api_key:
+        if api_key and llm_calls_enabled:
             try:
                 self._client = OpenAI(api_key=api_key, max_retries=0, timeout=timeout_seconds)
             except Exception as exc:
@@ -161,6 +163,8 @@ class ExpenseAnalyzer:
 
     def _unavailable_reason(self) -> str:
         """Why this analyzer has no client, for the fallback's error_message."""
+        if not self.llm_calls_enabled:
+            return "LLM calls are disabled."
         if self._client_error is not None:
             return f"OpenAI client is unavailable ({self._client_error})."
         return "OPENAI_API_KEY is not configured."
